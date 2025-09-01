@@ -72,51 +72,60 @@ def _debug_shot(page, handle: str, tag: str):
 
 
 def _open_overflow(page) -> bool:
-    # Try multiple targets for the overflow/more actions
-    selectors = [
-        '[data-testid="userActions"] [data-testid="overflow"]',
-        '[data-testid="userActions"] [aria-label*="More"]',
-        'div[role="button"][aria-label*="More actions"]',
-        'div[role="button"][aria-label*="More"]',
-    ]
-    ok = _click_first(page, selectors, timeout_ms=1500)
-    if not ok:
-        # Try role/name approach
-        try:
-            btn = page.get_by_role("button", name=re.compile(r"^More( actions)?$", re.I))
-            btn.first.click(timeout=1000)
-            ok = True
-        except Exception:
-            ok = False
-    if not ok:
-        # JS fallback: click the last button inside userActions or anything with aria-label including More
-        try:
-            ok = page.evaluate(
-                """
-                () => {
-                  const roots = Array.from(document.querySelectorAll('[data-testid="userActions"]'));
-                  const isBtn = (el) => el && (el.tagName==='BUTTON' || el.getAttribute('role')==='button');
-                  const tryClick = (el) => { try { el.click(); return true; } catch {} return false; };
-                  // prefer explicit aria-label matches
-                  for (const r of roots) {
-                    const cands = r.querySelectorAll('[aria-label*="More" i], [aria-label*="actions" i]');
-                    for (const el of Array.from(cands)) if (isBtn(el) && tryClick(el)) return true;
-                  }
-                  // fallback: last button-like in userActions
-                  for (const r of roots) {
-                    const btns = Array.from(r.querySelectorAll('button,[role="button"]'));
-                    if (btns.length) {
-                      const el = btns[btns.length-1];
-                      if (tryClick(el)) return true;
-                    }
-                  }
-                  return false;
+    # Strictly operate within the profile header actions to avoid sidebar/live widgets
+    header = page.locator('[data-testid="userActions"]').first
+    try:
+        header.wait_for(state="attached", timeout=1500)
+    except Exception:
+        return False
+    # direct overflow button in header
+    try:
+        el = header.locator('[data-testid="overflow"]').first
+        el.wait_for(state="visible", timeout=1200)
+        el.click()
+        return True
+    except Exception:
+        pass
+    # aria-label fallback in header only
+    try:
+        el = header.locator('[aria-label*="More" i], [aria-label*="More actions" i]').first
+        el.wait_for(state="visible", timeout=1200)
+        el.click()
+        return True
+    except Exception:
+        pass
+    # role-based in header
+    try:
+        el = header.get_by_role("button", name=re.compile(r"^More( actions)?$", re.I)).first
+        el.click(timeout=1200)
+        return True
+    except Exception:
+        pass
+    # JS fallback scoped to header
+    try:
+        ok = page.evaluate(
+            """
+            () => {
+              const root = document.querySelector('[data-testid="userActions"]');
+              if(!root) return false;
+              const isBtn = (el) => el && (el.tagName==='BUTTON' || el.getAttribute('role')==='button');
+              const tryClick = (el) => { try { el.click(); return true; } catch {} return false; };
+              const cands = root.querySelectorAll('[data-testid="overflow"],[aria-label*="More" i],[aria-label*="More actions" i],button,[role="button"]');
+              for (const el of Array.from(cands)) {
+                const name = (el.getAttribute('aria-label')||'').toLowerCase();
+                if (isBtn(el) && name.includes('more')) {
+                  if (tryClick(el)) return true;
                 }
-                """
-            )
-        except Exception:
-            ok = False
-    return ok
+              }
+              return false;
+            }
+            """
+        )
+        if ok:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _confirm_block(page) -> bool:
@@ -155,12 +164,13 @@ def _block_ui_sync(page) -> bool:
     if not _open_overflow(page):
         return False
     try:
-        page.locator('div[role="menu"]').wait_for(state="visible", timeout=800)
+        menu = page.locator('div[role="menu"]').first
+        menu.wait_for(state="visible", timeout=1000)
     except Exception:
-        pass
+        menu = page.locator('div[role="menu"]').first
     # Try a series of strategies to click Block
     clicked = _click_first(
-        page,
+        menu,
         [
             'div[role="menuitem"]:has-text("Block ")',
             'div[role="menuitem"]:has-text("Block @")',
@@ -173,7 +183,7 @@ def _block_ui_sync(page) -> bool:
     if not clicked:
         # Role-based query then JS text match
         try:
-            page.get_by_role("menuitem", name=re.compile(r"^Block", re.I)).first.click(timeout=1200)
+            menu.get_by_role("menuitem", name=re.compile(r"^Block", re.I)).first.click(timeout=1200)
             clicked = True
         except Exception:
             try:
@@ -181,7 +191,8 @@ def _block_ui_sync(page) -> bool:
                     page.evaluate(
                         """
                         () => {
-                          const menu = document.querySelector('div[role="menu"]') || document;
+                          const menu = document.querySelector('div[role="menu"]');
+                          if(!menu) return false;
                           const nodes = Array.from(menu.querySelectorAll('[role="menuitem"],button,div'));
                           for (const el of nodes) {
                             const t = (el.innerText||'').trim().toLowerCase();

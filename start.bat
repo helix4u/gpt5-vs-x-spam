@@ -21,7 +21,7 @@ set "WIN_LOOP_POLICY=selector"
 start "gpt5-api" cmd /c "cd /d "%BACKEND%" && "%VENV_PY%" run_api.py"
 
 REM 4) Start frontend static server on port 5500
-start "gpt5-ui" cmd /c "cd /d "%FRONTEND%" && "%VENV_PY%" -m http.server 5500"
+start "gpt5-ui" cmd /c "cd /d "%FRONTEND%" && "%VENV_PY%" -m http.server 5500 --bind 0.0.0.0"
 
 REM 5) Open the UI
 start "" http://127.0.0.1:5500/
@@ -35,4 +35,3 @@ exit /b 0
 echo.
 echo Start failed with error %errorlevel%.
 exit /b %errorlevel%
-

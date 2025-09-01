@@ -36,6 +36,7 @@
     <div class="bar" style="margin-bottom:8px; gap:8px;">
       <button id="tabSearch" class="btn ok" style="min-width:120px;">Search</button>
       <button id="tabHistory" class="btn secondary" style="min-width:120px;">History</button>
+      
     </div>
     <div class="bar" style="flex-wrap: wrap; gap:12px">
       <input id="q" type="text" placeholder="maye musk">
@@ -73,6 +74,7 @@
       </div>
       <div id="histList" class="grid" style="margin-top:10px"></div>
     </div>
+    
   </div>
 
   <script>
@@ -123,7 +125,9 @@
   // Tabs: Search vs History
   const tabSearch = document.getElementById('tabSearch');
   const tabHistory = document.getElementById('tabHistory');
+  
   const historyPane = document.getElementById('historyPane');
+  
   const bars = document.querySelectorAll('.bar');
   const searchControls = bars[1];
   function showSearch(){
@@ -143,8 +147,10 @@
     document.getElementById('out').style.display='none';
     initHistory();
   }
+  
   tabSearch.addEventListener('click', showSearch);
   tabHistory.addEventListener('click', showHistory);
+  
 
   function renderProfiles(list) {
     const out = document.getElementById('out');
@@ -210,6 +216,19 @@
     return handles;
   }
 
+  function selectLikelySpam() {
+    const handles = [];
+    document.querySelectorAll('#out [data-handle]').forEach(card => {
+      const badge = card.querySelector('[data-label]');
+      const h = card.getAttribute('data-handle');
+      if (badge && /likely_spam/i.test(badge.textContent||'')) {
+        const chk = card.querySelector('.blk');
+        if (chk) { chk.checked = true; handles.push(h); }
+      }
+    });
+    return handles;
+  }
+
   function attachBlockButtons() {
     // block queued
     const blk = () => Array.from(document.querySelectorAll('.blk'));
@@ -233,6 +252,13 @@
       s.innerText = 'select likely impersonators';
       s.onclick = () => { const hs = selectLikelyImpersonators(); alert(`selected ${hs.length}`); };
       wrap.appendChild(s);
+
+      const sp = document.createElement('button');
+      sp.id = 'selspam'; sp.style.marginTop = '8px'; sp.style.marginLeft = '8px';
+      sp.className = 'btn secondary';
+      sp.innerText = 'select likely spam';
+      sp.onclick = () => { const hs = selectLikelySpam(); alert(`selected ${hs.length}`); };
+      wrap.appendChild(sp);
     }
   }
 
@@ -303,6 +329,9 @@
     }
   }
   document.getElementById('loadHist').addEventListener('click', loadHist);
+
+  // --------- Post Block
+  
   </script>
 </body>
  </html>

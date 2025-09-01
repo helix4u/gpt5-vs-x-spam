@@ -57,29 +57,43 @@ def _extract_profiles(page, query: str, max_results: int = 40) -> List[Profile]:
     return results
 
 
-def _scroll_for_more(page, max_results: int, max_scrolls: int = 40, step_px: int = 1400, wait_ms: int = 350):
+def _scroll_for_more(page, max_results: int):
     cells = page.locator('[data-testid="UserCell"]')
-    last = 0
     stable = 0
-    for _ in range(max_scrolls):
+    last_count = 0
+    max_iters = max(10, int(settings.scrape_scroll_max_iters))
+    for _ in range(max_iters):
         count = cells.count()
         if count >= max_results:
             break
-        # scroll down by a chunk
-        try:
-            page.mouse.wheel(0, step_px)
-        except Exception:
-            try:
-                page.evaluate("window.scrollBy(0, arguments[0])", step_px)
-            except Exception:
-                pass
-        page.wait_for_timeout(wait_ms)
-        now = cells.count()
-        if now <= count:
+        # mark stability
+        if count == last_count:
             stable += 1
         else:
             stable = 0
-        if stable >= 3:
+            last_count = count
+        # bring last cell into view to trigger lazy-loading
+        try:
+            if count > 0:
+                cells.nth(count - 1).scroll_into_view_if_needed(timeout=800)
+        except Exception:
+            pass
+        # scroll
+        step = max(600, int(settings.scrape_scroll_step_px))
+        try:
+            page.mouse.wheel(0, step)
+        except Exception:
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", step)
+            except Exception:
+                pass
+        # wait for new cells or timeout (no complex JS to avoid parse issues)
+        try:
+            page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
+        except Exception:
+            page.wait_for_timeout(max(250, int(settings.scrape_scroll_wait_ms)))
+        # stop if no growth after several steps
+        if stable >= max(3, int(settings.scrape_scroll_stable_iters)):
             break
 
 
@@ -112,7 +126,7 @@ def scrape_search_users_sync(query: str, max_results: int = 40) -> List[Profile]
         page = ctx.new_page()
         page.goto(SEARCH_URL.format(q=query))
         # allow manual login... or already logged session cookies
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
         try:
             page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
         except PwTimeout:

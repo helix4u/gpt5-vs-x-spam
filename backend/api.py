@@ -3,10 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import asyncio
 from .types import SearchResponse, Profile, Classification, BlockResult
-from .scraper import scrape_search_users
 from .scraper_sync import scrape_search_users_sync as scrape_sync, scrape_user_list_sync
 from .classifier import classify_profiles
-from .actions import block_handles
+from .actions import block_handles, open_login_window_sync
 from .storage import save_classification, read_jsonl
 from .config import settings
 from fastapi.responses import StreamingResponse
@@ -46,7 +45,8 @@ async def api_search(
     if headless is not None:
         settings.headless = bool(headless)
 
-    profiles: List[Profile] = await scrape_search_users(query, max_results=max_results)
+    # Use sync Playwright scraper in a worker thread to avoid mixing async/sync Playwright
+    profiles: List[Profile] = await asyncio.to_thread(scrape_sync, query, max_results, None)
     classes: Optional[List[Classification]] = None
     if classify and profiles:
         overrides = {}
@@ -121,7 +121,13 @@ async def api_search_stream(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if scrape_task in done:
-                profiles = scrape_task.result()
+                try:
+                    profiles = scrape_task.result()
+                except Exception as e:
+                    # Surface scraper failure as SSE error and terminate stream gracefully
+                    yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
+                    yield _sse_pack("done", {"ok": False})
+                    return
                 # drain queue for any remaining progress
                 while not queue.empty():
                     kind, data = await queue.get()
@@ -204,7 +210,12 @@ async def api_user_list_stream(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if scrape_task in done:
-                profiles = scrape_task.result()
+                try:
+                    profiles = scrape_task.result()
+                except Exception as e:
+                    yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
+                    yield _sse_pack("done", {"ok": False})
+                    return
                 while not queue.empty():
                     kind, data = await queue.get()
                     if kind == "progress":
@@ -273,3 +284,9 @@ async def api_history_items(day: str, typ: str = "all", limit: int = 100, offset
         out.append(r)
     out.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
     return {"items": out[offset : offset + limit], "total": len(out)}
+
+
+@app.post("/api/login")
+async def api_login():
+    ok = await asyncio.to_thread(open_login_window_sync)
+    return {"ok": bool(ok)}

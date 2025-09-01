@@ -1,5 +1,6 @@
 from typing import List, Optional, Callable
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright.sync_api import TimeoutError as PwTimeout
+from .actions import _ensure_ctx
 from .config import settings
 from .types import Profile
 from .storage import write_profile_cache, save_dataset_entry, now_iso
@@ -149,46 +150,47 @@ def _scroll_for_more(page, max_results: int):
 
 
 def scrape_search_users_sync(query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
-    with sync_playwright() as p:
-        # Prefer persistent context to preserve login session
-        ctx = None
-        browser = None
-        if settings.user_data_dir:
-            ctx = p.chromium.launch_persistent_context(
-                settings.user_data_dir,
-                headless=settings.headless,
-                args=settings.chromium_args,
-                user_agent=settings.user_agent,
-                slow_mo=settings.slow_mo_ms,
-            )
-        else:
-            browser = p.chromium.launch(
-                headless=settings.headless,
-                args=settings.chromium_args,
-                slow_mo=settings.slow_mo_ms,
-            )
-            ctx = browser.new_context(user_agent=settings.user_agent)
+    pw, browser, ctx, owned = _ensure_ctx()
+    if ctx is None:
+        return []
 
-        # Reduce automation fingerprints
+    # Reduce automation fingerprints
+    try:
         ctx.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
+    except Exception:
+        pass
 
-        page = ctx.new_page()
-        page.goto(SEARCH_URL.format(q=query))
-        # allow manual login... or already logged session cookies
-        page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    page = ctx.new_page()
+    page.goto(SEARCH_URL.format(q=query))
+    # allow manual login... or already logged session cookies
+    page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    try:
+        page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
+    except PwTimeout:
+        profiles = []
+    else:
+        # incrementally collect unique profiles while scrolling (calls on_new as items appear)
+        profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
+
+    # Close only if we created this context here
+    if owned:
         try:
-            page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
-        except PwTimeout:
-            profiles = []
-        else:
-            # incrementally collect unique profiles while scrolling (calls on_new as items appear)
-            profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
-        if browser:
-            browser.close()
-        else:
             ctx.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+
     for prof in profiles:
         write_profile_cache(prof)
         save_dataset_entry(prof)
@@ -199,42 +201,43 @@ def scrape_user_list_sync(username: str, list_type: str = "followers", max_resul
     user = username.lstrip('@')
     segment = "followers" if list_type.lower() == "followers" else "following"
     url = f"https://x.com/{user}/{segment}"
-    with sync_playwright() as p:
-        ctx = None
-        browser = None
-        if settings.user_data_dir:
-            ctx = p.chromium.launch_persistent_context(
-                settings.user_data_dir,
-                headless=settings.headless,
-                args=settings.chromium_args,
-                user_agent=settings.user_agent,
-                slow_mo=settings.slow_mo_ms,
-            )
-        else:
-            browser = p.chromium.launch(
-                headless=settings.headless,
-                args=settings.chromium_args,
-                slow_mo=settings.slow_mo_ms,
-            )
-            ctx = browser.new_context(user_agent=settings.user_agent)
+    pw, browser, ctx, owned = _ensure_ctx()
+    if ctx is None:
+        return []
 
+    try:
         ctx.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
+    except Exception:
+        pass
 
-        page = ctx.new_page()
-        page.goto(url)
-        page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    page = ctx.new_page()
+    page.goto(url)
+    page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    try:
+        page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
+    except PwTimeout:
+        profiles: List[Profile] = []
+    else:
+        profiles = _collect_profiles_incremental(page, query=f"{segment}:{user}", max_results=max_results, on_new=on_new)
+
+    if owned:
         try:
-            page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
-        except PwTimeout:
-            profiles: List[Profile] = []
-        else:
-            profiles = _collect_profiles_incremental(page, query=f"{segment}:{user}", max_results=max_results, on_new=on_new)
-        if browser:
-            browser.close()
-        else:
             ctx.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+
     for prof in profiles:
         write_profile_cache(prof)
         save_dataset_entry(prof)

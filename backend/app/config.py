@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     scrape_scroll_max_iters: int = Field(default=50)    # max scroll attempts per search
     scrape_scroll_stable_iters: int = Field(default=3)   # stop if no new cells after N steps
 
+    # api server bind
+    api_host: str = Field(default_factory=lambda: os.getenv("API_HOST", "127.0.0.1"))
+    api_port: int = Field(default_factory=lambda: int(os.getenv("API_PORT", "8000")))
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

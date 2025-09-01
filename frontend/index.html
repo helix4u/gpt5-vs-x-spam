@@ -39,8 +39,8 @@
     </div>
     <div class="bar" style="margin-bottom:8px; gap:8px;">
       <button id="tabSearch" class="btn ok" style="min-width:120px;">Search</button>
+      <button id="tabUserList" class="btn secondary" style="min-width:120px;">User List</button>
       <button id="tabHistory" class="btn secondary" style="min-width:120px;">History</button>
-      
     </div>
     <div class="bar" style="flex-wrap: wrap; gap:12px">
       <input id="q" type="text" placeholder="maye musk">
@@ -57,6 +57,15 @@
       <input id="modelId" type="text" placeholder="model id (e.g. gpt-4o-mini)" style="min-width:200px">
       <input id="apiKey" type="password" placeholder="api key (optional)" style="min-width:200px">
       <button id="run">run</button>
+    </div>
+    <div id="userListControls" class="bar" style="flex-wrap: wrap; gap:12px; display:none">
+      <input id="userName" type="text" placeholder="username or @handle">
+      <select id="userListType" title="list type" style="background:#0b1220; color:var(--text); border:1px solid #223; padding:9px; border-radius:10px">
+        <option value="followers">followers</option>
+        <option value="following">following</option>
+      </select>
+      <input id="maxNList" type="number" min="1" max="1000" value="100" style="width:110px" title="max users">
+      <button id="runList">run</button>
     </div>
     <div id="note" class="small" style="margin-top:8px">log into x in the scraper window... results will appear below...</div>
     <div id="prog" class="small" style="margin-top:6px;color:#9ca3af"></div>
@@ -126,34 +135,74 @@
   vendor.addEventListener('change', applyVendor);
   [apiBase, modelId, apiKey, maxN, doClass].forEach(el => el.addEventListener('change', save));
 
-  // Tabs: Search vs History
+  // Tabs: Search vs User List vs History
   const tabSearch = document.getElementById('tabSearch');
+  const tabUserList = document.getElementById('tabUserList');
   const tabHistory = document.getElementById('tabHistory');
-  
   const historyPane = document.getElementById('historyPane');
-  
   const bars = document.querySelectorAll('.bar');
   const searchControls = bars[1];
+  const userListControls = document.getElementById('userListControls');
   function showSearch(){
-    tabSearch.className='btn ok'; tabHistory.className='btn secondary';
+    tabSearch.className='btn ok'; if(tabUserList) tabUserList.className='btn secondary'; tabHistory.className='btn secondary';
     historyPane.style.display='none';
     searchControls.style.display='flex';
+    if (userListControls) userListControls.style.display='none';
     document.getElementById('note').style.display='block';
     document.getElementById('prog').style.display='block';
     document.getElementById('out').style.display='grid';
   }
   function showHistory(){
-    tabSearch.className='btn secondary'; tabHistory.className='btn ok';
+    tabSearch.className='btn secondary'; if(tabUserList) tabUserList.className='btn secondary'; tabHistory.className='btn ok';
     historyPane.style.display='block';
     searchControls.style.display='none';
+    if (userListControls) userListControls.style.display='none';
     document.getElementById('note').style.display='none';
     document.getElementById('prog').style.display='none';
     document.getElementById('out').style.display='none';
     initHistory();
   }
+  function showUserList(){
+    tabSearch.className='btn secondary'; if (tabUserList) tabUserList.className='btn ok'; tabHistory.className='btn secondary';
+    historyPane.style.display='none';
+    searchControls.style.display='none';
+    if (userListControls) userListControls.style.display='flex';
+    document.getElementById('note').style.display='block';
+    document.getElementById('prog').style.display='block';
+    document.getElementById('out').style.display='grid';
+  }
   
   tabSearch.addEventListener('click', showSearch);
+  if (tabUserList) tabUserList.addEventListener('click', showUserList);
   tabHistory.addEventListener('click', showHistory);
+
+  // Run user list scrape
+  const runListBtn = document.getElementById('runList');
+  if (runListBtn) runListBtn.onclick = async () => {
+    const u = document.getElementById('userName').value.trim();
+    const lt = document.getElementById('userListType').value;
+    const maxResults = parseInt(document.getElementById('maxNList').value || '100', 10) || 100;
+    const base = (apiBase.value || '').trim();
+    const model = (modelId.value || '').trim();
+    const provider = vendor.value;
+    const key = (apiKey.value || '').trim();
+    const outEl = document.getElementById('out');
+    const prog = document.getElementById('prog');
+    outEl.innerHTML = '';
+    if(!u){ alert('enter a username'); return; }
+    const qp = new URLSearchParams({ user: u, list_type: lt, classify: String(doClass.checked), max_results: String(maxResults) });
+    if (provider && provider !== 'custom') qp.set('llm_provider', provider);
+    if (base) qp.set('llm_api_base', base);
+    if (model) qp.set('llm_model', model);
+    const url = `${'http://127.0.0.1:8000'}/api/user_list_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
+    const es = new EventSource(url);
+    es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; } });
+    es.addEventListener('profiles', (ev) => { try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {} });
+    es.addEventListener('profiles_chunk', (ev) => { try { const list = JSON.parse(ev.data); renderProfiles(list); } catch {} });
+    es.addEventListener('progress', (ev) => { try { const d = JSON.parse(ev.data); const tgt = d.target||'?'; const n = d.count||0; prog.textContent = `scraping ${n}/${tgt}`; if (Array.isArray(d.added)) renderProfiles(d.added); } catch {} });
+    es.addEventListener('classification', (ev) => { try { const list = JSON.parse(ev.data); renderClassifications(list); } catch {} });
+    es.addEventListener('done', () => { prog.textContent = 'done'; es.close(); });
+  };
   
 
   function renderProfiles(list) {

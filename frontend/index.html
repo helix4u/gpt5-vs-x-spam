@@ -293,6 +293,12 @@
     es.addEventListener('profiles', (ev) => {
       try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {}
     });
+    es.addEventListener('profiles_chunk', (ev) => {
+      try { const list = JSON.parse(ev.data); renderProfiles(list); } catch {}
+    });
+    es.addEventListener('progress', (ev) => {
+      try { const d = JSON.parse(ev.data); const tgt = d.target||'?'; const n = d.count||0; prog.textContent = `scraping ${n}/${tgt}`; if (Array.isArray(d.added)) renderProfiles(d.added); } catch {}
+    });
     es.addEventListener('classification', (ev) => {
       try { const list = JSON.parse(ev.data); renderClassifications(list); } catch {}
     });

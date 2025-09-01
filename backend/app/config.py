@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     debug_screenshots: bool = Field(default=False)
     screenshot_dir: str = Field(default="data/debug")
 
+    # scraping scroll tuning
+    scrape_scroll_wait_ms: int = Field(default=950)      # wait after each scroll
+    scrape_scroll_step_px: int = Field(default=500)     # how far to scroll each step
+    scrape_scroll_max_iters: int = Field(default=50)    # max scroll attempts per search
+    scrape_scroll_stable_iters: int = Field(default=3)   # stop if no new cells after N steps
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

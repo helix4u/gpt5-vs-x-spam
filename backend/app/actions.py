@@ -107,12 +107,12 @@ def _open_overflow(page) -> bool:
     except Exception:
         pass
 
-    # 3) Global fallback: any "More" button not in sidebar/live/space widgets
+    # 3) Global fallback: any "More" button not in sidebar/live pill
     try:
         ok = page.evaluate(
             """
             () => {
-              const isBad = (el) => el.closest('[data-testid="sidebarColumn"], [data-testid="pill-contents-container"], [data-testid="placementTracking"]');
+              const isBad = (el) => el.closest('[data-testid="sidebarColumn"]') || el.closest('[data-testid="pill-contents-container"]');
               const byAria = Array.from(document.querySelectorAll('button[role="button"][aria-label]'));
               for (const b of byAria) {
                 const label = (b.getAttribute('aria-label')||'').toLowerCase();

@@ -1,10 +1,14 @@
 import sys
+import os
 import uvicorn
+from app.config import settings
 
 
 def main():
     # No reload for simplicity/stability on Windows
-    uvicorn.run("app.api:app", host="127.0.0.1", port=8000, reload=False)
+    host = settings.api_host
+    port = settings.api_port
+    uvicorn.run("app.api:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

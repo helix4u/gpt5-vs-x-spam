@@ -24,16 +24,15 @@
   </style>
   <script>
     // small helper to target the FastAPI server; defaults to current hostname:8000
+    function getApiBase(){
+      const stored = localStorage.getItem('gpt5x.apiBase') || '';
+      const host = location.hostname || '127.0.0.1';
+      const defaultBase = `${location.protocol}//${host}:8000`;
+      return (stored && /^https?:\/\//i.test(stored)) ? stored : defaultBase;
+    }
     function api(path, opts={}){
-      try {
-        const stored = localStorage.getItem('gpt5x.apiBase') || '';
-        const host = location.hostname || '127.0.0.1';
-        const defaultBase = `${location.protocol}//${host}:8000`;
-        const base = (stored && /^https?:\/\//i.test(stored)) ? stored : defaultBase;
-        return fetch(base + path, opts).then(r=>r.json());
-      } catch {
-        return fetch(path, opts).then(r=>r.json());
-      }
+      try { return fetch(getApiBase() + path, opts).then(r=>r.json()); }
+      catch { return fetch(path, opts).then(r=>r.json()); }
     }
   </script>
 </head>
@@ -201,7 +200,7 @@
     if (provider && provider !== 'custom') qp.set('llm_provider', provider);
     if (base) qp.set('llm_api_base', base);
     if (model) qp.set('llm_model', model);
-    const url = `${'http://127.0.0.1:8000'}/api/user_list_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
+    const url = `${getApiBase()}/api/user_list_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(url);
     es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; } });
     es.addEventListener('profiles', (ev) => { try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {} });
@@ -345,7 +344,7 @@
     if (provider && provider !== 'custom') qp.set('llm_provider', provider);
     if (base) qp.set('llm_api_base', base);
     if (model) qp.set('llm_model', model);
-    const sseUrl = `${'http://127.0.0.1:8000'}/api/search_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
+    const sseUrl = `${getApiBase()}/api/search_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(sseUrl);
     es.addEventListener('status', (ev) => {
       try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; }

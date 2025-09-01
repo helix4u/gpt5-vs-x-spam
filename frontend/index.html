@@ -238,21 +238,23 @@
       const res = await api('/api/block', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(handles) });
       alert('block results...\n' + JSON.stringify(res, null, 2));
     };
+    const wrap = document.querySelector('.wrap');
     if (!document.getElementById('blkbtn')) {
-      const wrap = document.querySelector('.wrap');
       const b = document.createElement('button');
       b.id = 'blkbtn'; b.style.marginTop = '8px';
       b.innerText = 'run block on selected';
       b.onclick = window.queueBlock;
       wrap.appendChild(b);
-
+    }
+    if (!document.getElementById('selimp')) {
       const s = document.createElement('button');
       s.id = 'selimp'; s.style.marginTop = '8px'; s.style.marginLeft = '8px';
       s.className = 'btn secondary';
       s.innerText = 'select likely impersonators';
       s.onclick = () => { const hs = selectLikelyImpersonators(); alert(`selected ${hs.length}`); };
       wrap.appendChild(s);
-
+    }
+    if (!document.getElementById('selspam')) {
       const sp = document.createElement('button');
       sp.id = 'selspam'; sp.style.marginTop = '8px'; sp.style.marginLeft = '8px';
       sp.className = 'btn secondary';

@@ -107,24 +107,24 @@ def _open_overflow(page) -> bool:
     except Exception:
         pass
 
-    # 3) Global fallback: any "More" button not in sidebar/live pill
+    # 3) Scoped fallback: any "More" button inside <main>
     try:
         ok = page.evaluate(
             """
             () => {
-              const isBad = (el) => el.closest('[data-testid="sidebarColumn"]') || el.closest('[data-testid="pill-contents-container"]');
-              const byAria = Array.from(document.querySelectorAll('button[role="button"][aria-label]'));
+              const root = document.querySelector('main, [role="main"]');
+              if (!root) return false;
+              const byAria = Array.from(root.querySelectorAll('button[role="button"][aria-label]'));
               for (const b of byAria) {
                 const label = (b.getAttribute('aria-label')||'').toLowerCase();
-                if (!label.includes('more')) continue;
-                if (isBad(b)) continue;
-                try { b.click(); return true; } catch {}
+                if (label.includes('more')) {
+                  try { b.click(); return true; } catch {}
+                }
               }
-              const all = Array.from(document.querySelectorAll('[role="button"]'));
+              const all = Array.from(root.querySelectorAll('[role="button"]'));
               for (const b of all) {
                 const t = (b.innerText||'').trim().toLowerCase();
-                if (t==='more' || t==='more actions') {
-                  if (isBad(b)) continue;
+                if (t === 'more' || t === 'more actions') {
                   try { b.click(); return true; } catch {}
                 }
               }

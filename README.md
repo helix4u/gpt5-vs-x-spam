@@ -99,3 +99,11 @@ Security & compliance
 legal and safety...
 
 automating interactions with x.com may be restricted by their terms of service and local laws. use only on accounts you own or have permission to manage. this code is provided for research and moderation assistance; you are responsible for compliance.
+
+<img width="1470" height="1129" alt="image" src="https://github.com/user-attachments/assets/e3d680ce-e4e2-4159-8028-2bd5b4fc82d7" />
+
+--
+
+<img width="1470" height="1129" alt="image" src="https://github.com/user-attachments/assets/758e456e-1010-4bbd-86d7-780db7bfa4f3" />
+
+

@@ -72,49 +72,60 @@ def _debug_shot(page, handle: str, tag: str):
 
 
 def _open_overflow(page) -> bool:
-    # Strictly operate within the profile header actions to avoid sidebar/live widgets
-    header = page.locator('[data-testid="userActions"]').first
+    """Open the profile header 'More' menu using robust fallbacks.
+
+    Order:
+    1) button[data-testid=userActions]
+    2) [data-testid=userActions][role=button] or its inner [data-testid=overflow]
+    3) Any role=button with aria-label containing "More", excluding sidebar/live widgets
+    """
+    # 1) Exact button variant
     try:
-        header.wait_for(state="attached", timeout=1500)
+        btn = page.locator('button[data-testid="userActions"]').first
+        btn.wait_for(state="visible", timeout=1200)
+        btn.click()
+        page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
+        return True
     except Exception:
-        return False
-    # direct overflow button in header
+        pass
+
+    # 2) Container acting as a button or inner overflow
     try:
-        el = header.locator('[data-testid="overflow"]').first
+        ua = page.locator('[data-testid="userActions"]').first
+        ua.wait_for(state="attached", timeout=1200)
+        role = (ua.get_attribute('role') or '').lower()
+        aria = (ua.get_attribute('aria-label') or '').lower()
+        if role == 'button' or ('more' in aria):
+            ua.click()
+            page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
+            return True
+        el = ua.locator('[data-testid="overflow"]').first
         el.wait_for(state="visible", timeout=1200)
         el.click()
+        page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
         return True
     except Exception:
         pass
-    # aria-label fallback in header only
-    try:
-        el = header.locator('[aria-label*="More" i], [aria-label*="More actions" i]').first
-        el.wait_for(state="visible", timeout=1200)
-        el.click()
-        return True
-    except Exception:
-        pass
-    # role-based in header
-    try:
-        el = header.get_by_role("button", name=re.compile(r"^More( actions)?$", re.I)).first
-        el.click(timeout=1200)
-        return True
-    except Exception:
-        pass
-    # JS fallback scoped to header
+
+    # 3) Global fallback: any "More" button not in sidebar/live pill
     try:
         ok = page.evaluate(
             """
             () => {
-              const root = document.querySelector('[data-testid="userActions"]');
-              if(!root) return false;
-              const isBtn = (el) => el && (el.tagName==='BUTTON' || el.getAttribute('role')==='button');
-              const tryClick = (el) => { try { el.click(); return true; } catch {} return false; };
-              const cands = root.querySelectorAll('[data-testid="overflow"],[aria-label*="More" i],[aria-label*="More actions" i],button,[role="button"]');
-              for (const el of Array.from(cands)) {
-                const name = (el.getAttribute('aria-label')||'').toLowerCase();
-                if (isBtn(el) && name.includes('more')) {
-                  if (tryClick(el)) return true;
+              const isBad = (el) => el.closest('[data-testid="sidebarColumn"]') || el.closest('[data-testid="pill-contents-container"]');
+              const byAria = Array.from(document.querySelectorAll('button[role="button"][aria-label]'));
+              for (const b of byAria) {
+                const label = (b.getAttribute('aria-label')||'').toLowerCase();
+                if (!label.includes('more')) continue;
+                if (isBad(b)) continue;
+                try { b.click(); return true; } catch {}
+              }
+              const all = Array.from(document.querySelectorAll('[role="button"]'));
+              for (const b of all) {
+                const t = (b.innerText||'').trim().toLowerCase();
+                if (t==='more' || t==='more actions') {
+                  if (isBad(b)) continue;
+                  try { b.click(); return true; } catch {}
                 }
               }
               return false;
@@ -122,6 +133,8 @@ def _open_overflow(page) -> bool:
             """
         )
         if ok:
+            page.locator('div[role]="menu"')
+            page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
             return True
     except Exception:
         pass
@@ -165,10 +178,10 @@ def _block_ui_sync(page) -> bool:
         return False
     try:
         menu = page.locator('div[role="menu"]').first
-        menu.wait_for(state="visible", timeout=1000)
+        menu.wait_for(state="visible", timeout=1500)
     except Exception:
-        menu = page.locator('div[role="menu"]').first
-    # Try a series of strategies to click Block
+        return False
+    # Try a series of strategies to click Block (menu-scoped)
     clicked = _click_first(
         menu,
         [

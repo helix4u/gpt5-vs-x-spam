@@ -21,6 +21,19 @@
     .label.ok { background:#10291f; color:#d6ffee; border-color:#1a4e36 }
     .row { display:flex; gap:8px; align-items:center; margin-top:8px }
     .small { color:var(--muted); font-size:12px }
+
+    /* Mobile responsiveness */
+    #tabsBar { position: sticky; top: 0; z-index: 40; background: var(--bg); padding-top: env(safe-area-inset-top, 0px); margin-bottom: 10px }
+    @media (max-width: 768px) {
+      body { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); }
+      .wrap { padding: 12px }
+      .bar { flex-direction: column; align-items: stretch; gap: 10px }
+      .bar input[type=text], .bar input[type=number], .bar select, .bar button { width: 100% }
+      button { min-height: 44px }
+      .grid { grid-template-columns: 1fr }
+      .card { padding: 12px; margin-bottom: 6px }
+      .row { flex-wrap: wrap }
+    }
   </style>
   <script>
     // small helper to target the FastAPI server; defaults to current hostname:8000
@@ -43,7 +56,7 @@
       If this helps you, consider supporting:
       <a href="https://ko-fi.com/gille" target="_blank" rel="noopener" style="color:#22c55e">ko-fi.com/gille</a>
     </div>
-    <div class="bar" style="margin-bottom:8px; gap:8px;">
+    <div id="tabsBar" class="bar" style="margin-bottom:8px; gap:8px;">
       <button id="tabSearch" class="btn ok" style="min-width:120px;">Search</button>
       <button id="tabUserList" class="btn secondary" style="min-width:120px;">User List</button>
       <button id="tabHistory" class="btn secondary" style="min-width:120px;">History</button>

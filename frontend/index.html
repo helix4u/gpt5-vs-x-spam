@@ -23,10 +23,17 @@
     .small { color:var(--muted); font-size:12px }
   </style>
   <script>
-    // small helper to target the FastAPI server on 127.0.0.1:8000
+    // small helper to target the FastAPI server; defaults to current hostname:8000
     function api(path, opts={}){
-      const base = 'http://127.0.0.1:8000';
-      return fetch(base + path, opts).then(r=>r.json());
+      try {
+        const stored = localStorage.getItem('gpt5x.apiBase') || '';
+        const host = location.hostname || '127.0.0.1';
+        const defaultBase = `${location.protocol}//${host}:8000`;
+        const base = (stored && /^https?:\/\//i.test(stored)) ? stored : defaultBase;
+        return fetch(base + path, opts).then(r=>r.json());
+      } catch {
+        return fetch(path, opts).then(r=>r.json());
+      }
     }
   </script>
 </head>

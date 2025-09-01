@@ -3,10 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import asyncio
 from .types import SearchResponse, Profile, Classification, BlockResult
-from .scraper import scrape_search_users
-from .scraper_sync import scrape_search_users_sync as scrape_sync
+from .scraper_sync import scrape_search_users_sync as scrape_sync, scrape_user_list_sync
 from .classifier import classify_profiles
-from .actions import block_handles
+from .actions import block_handles, open_login_window_sync
 from .storage import save_classification, read_jsonl
 from .config import settings
 from fastapi.responses import StreamingResponse
@@ -46,7 +45,8 @@ async def api_search(
     if headless is not None:
         settings.headless = bool(headless)
 
-    profiles: List[Profile] = await scrape_search_users(query, max_results=max_results)
+    # Use sync Playwright scraper in a worker thread to avoid mixing async/sync Playwright
+    profiles: List[Profile] = await asyncio.to_thread(scrape_sync, query, max_results, None)
     classes: Optional[List[Classification]] = None
     if classify and profiles:
         overrides = {}
@@ -121,7 +121,13 @@ async def api_search_stream(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if scrape_task in done:
-                profiles = scrape_task.result()
+                try:
+                    profiles = scrape_task.result()
+                except Exception as e:
+                    # Surface scraper failure as SSE error and terminate stream gracefully
+                    yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
+                    yield _sse_pack("done", {"ok": False})
+                    return
                 # drain queue for any remaining progress
                 while not queue.empty():
                     kind, data = await queue.get()
@@ -142,6 +148,92 @@ async def api_search_stream(
         # final payload
         yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
         yield _sse_pack("profiles", [p.model_dump() for p in profiles])
+        if classify and profiles:
+            yield _sse_pack("status", {"message": "classifying"})
+            overrides = {}
+            if llm_provider:
+                overrides["provider"] = llm_provider
+            if llm_api_base:
+                overrides["api_base"] = llm_api_base
+            if llm_model:
+                overrides["model"] = llm_model
+            if openai_api_key:
+                overrides["api_key"] = openai_api_key
+            classes = await classify_profiles(profiles, overrides=overrides)
+            for c in classes:
+                save_classification(c)
+            yield _sse_pack("classification", [c.model_dump() for c in classes])
+        yield _sse_pack("done", {"ok": True})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/user_list_stream")
+async def api_user_list_stream(
+    user: str = Query(..., min_length=1),
+    list_type: str = Query("followers"),
+    max_results: int = 100,
+    classify: bool = True,
+    llm_provider: Optional[str] = None,
+    llm_api_base: Optional[str] = None,
+    llm_model: Optional[str] = None,
+    openai_api_key: Optional[str] = None,
+):
+    async def gen():
+        yield _sse_pack("status", {"message": "starting", "user": user, "list": list_type})
+        yield _sse_pack("status", {"message": "navigating"})
+        yield _sse_pack("status", {"message": "scraping"})
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def on_new(added_profiles: List[Profile], count: int, target: int):
+            try:
+                payload = {
+                    "added": [p.model_dump() for p in added_profiles],
+                    "count": count,
+                    "target": target,
+                }
+                loop.call_soon_threadsafe(queue.put_nowait, ("progress", payload))
+            except Exception:
+                pass
+
+        async def run_scrape():
+            return await asyncio.to_thread(scrape_user_list_sync, user, list_type, max_results, on_new)
+
+        scrape_task = asyncio.create_task(run_scrape())
+        profiles: List[Profile] = []
+        scraping = True
+        while scraping:
+            done, pending = await asyncio.wait(
+                {scrape_task, asyncio.create_task(queue.get())},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if scrape_task in done:
+                try:
+                    profiles = scrape_task.result()
+                except Exception as e:
+                    yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
+                    yield _sse_pack("done", {"ok": False})
+                    return
+                while not queue.empty():
+                    kind, data = await queue.get()
+                    if kind == "progress":
+                        yield _sse_pack("progress", data)
+                        if data.get("added"):
+                            yield _sse_pack("profiles_chunk", data["added"])  # optional
+                scraping = False
+                break
+            else:
+                kind, data = list(done)[0].result()
+                if kind == "progress":
+                    yield _sse_pack("progress", data)
+                    if data.get("added"):
+                        yield _sse_pack("profiles_chunk", data["added"])  # optional
+
+        yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
+        yield _sse_pack("profiles", [p.model_dump() for p in profiles])
+
         if classify and profiles:
             yield _sse_pack("status", {"message": "classifying"})
             overrides = {}
@@ -192,3 +284,9 @@ async def api_history_items(day: str, typ: str = "all", limit: int = 100, offset
         out.append(r)
     out.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
     return {"items": out[offset : offset + limit], "total": len(out)}
+
+
+@app.post("/api/login")
+async def api_login():
+    ok = await asyncio.to_thread(open_login_window_sync)
+    return {"ok": bool(ok)}

@@ -5,6 +5,110 @@ from .config import settings
 from .types import BlockResult
 from .storage import save_block_result
 
+# Globals to keep an optional login window alive
+_LOGIN_STATE = {"pw": None, "browser": None, "ctx": None}
+
+def _ensure_ctx() -> tuple:
+    """Get a Playwright sync context, reusing the login context if present.
+
+    Returns (pw, browser, ctx, owned) where owned indicates whether this
+    function created a new Playwright instance that should be closed by caller.
+    """
+    try:
+        ctx = _LOGIN_STATE.get("ctx")
+        if ctx is not None:
+            # Validate the context by creating a temp page
+            try:
+                p = ctx.new_page()
+                p.close()
+                return (_LOGIN_STATE.get("pw"), _LOGIN_STATE.get("browser"), ctx, False)
+            except Exception:
+                # stale context; drop it
+                close_login_window_sync()
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        browser = None
+        if settings.user_data_dir:
+            ctx = pw.chromium.launch_persistent_context(
+                settings.user_data_dir,
+                headless=settings.headless,
+                args=settings.chromium_args,
+                user_agent=settings.user_agent,
+                slow_mo=settings.slow_mo_ms,
+            )
+        else:
+            browser = pw.chromium.launch(headless=settings.headless, args=settings.chromium_args)
+            ctx = browser.new_context(user_agent=settings.user_agent)
+        try:
+            ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+        except Exception:
+            pass
+        return (pw, browser, ctx, True)
+    except Exception:
+        return (None, None, None, False)
+
+def open_login_window_sync(start_url: str = "https://x.com/login") -> bool:
+    """Open a visible Chromium window at X login using the persistent profile.
+
+    Keeps Playwright objects alive in module globals so the window stays open
+    after the request returns.
+    """
+    try:
+        # Reuse existing context or create a new one (visible)
+        ctx = _LOGIN_STATE.get("ctx")
+        pw = _LOGIN_STATE.get("pw")
+        browser = _LOGIN_STATE.get("browser")
+        if ctx is None:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            browser = None
+            if settings.user_data_dir:
+                ctx = pw.chromium.launch_persistent_context(
+                    settings.user_data_dir,
+                    headless=False,
+                    args=settings.chromium_args,
+                    user_agent=settings.user_agent,
+                    slow_mo=settings.slow_mo_ms,
+                )
+            else:
+                browser = pw.chromium.launch(headless=False, args=settings.chromium_args)
+                ctx = browser.new_context(user_agent=settings.user_agent)
+            try:
+                ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+            except Exception:
+                pass
+        page = ctx.new_page()
+        page.goto(start_url)
+        _LOGIN_STATE.update({"pw": pw, "browser": browser, "ctx": ctx})
+        return True
+    except Exception:
+        return False
+
+def close_login_window_sync() -> bool:
+    try:
+        ctx = _LOGIN_STATE.get("ctx")
+        br = _LOGIN_STATE.get("browser")
+        pw = _LOGIN_STATE.get("pw")
+        if ctx:
+            try:
+                ctx.close()
+            except Exception:
+                pass
+        if br:
+            try:
+                br.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+        _LOGIN_STATE.update({"pw": None, "browser": None, "ctx": None})
+        return True
+    except Exception:
+        return False
+
 
 class RateLimiterSync:
     def __init__(self, max_actions=800, window_sec=900):
@@ -107,12 +211,22 @@ def _open_overflow(page) -> bool:
     except Exception:
         pass
 
-    # 3) Global fallback: any "More" button not in sidebar/live pill
+    # 3) Global fallback: any "More" button not in sidebar/live/placement widgets
     try:
         ok = page.evaluate(
             """
             () => {
-              const isBad = (el) => el.closest('[data-testid="sidebarColumn"]') || el.closest('[data-testid="pill-contents-container"]');
+              const isBad = (el) => {
+                // Exclude right sidebar modules and space/live widgets
+                if (el.closest('[data-testid="sidebarColumn"]')) return true;
+                if (el.closest('[data-testid="placementTracking"]')) return true;
+                // Many space/live buttons wrap the pill contents inside the button
+                // so we also check descendants instead of ancestors only
+                if (el.querySelector('[data-testid="pill-contents-container"]')) return true;
+                const aria = ((el.getAttribute('aria-label')||'') + ' ' + ((el.closest('[aria-label]')||{}).getAttribute?.('aria-label')||'')).toLowerCase();
+                if (aria.includes('broadcast') || aria.includes('space')) return true;
+                return false;
+              };
               const byAria = Array.from(document.querySelectorAll('button[role="button"][aria-label]'));
               for (const b of byAria) {
                 const label = (b.getAttribute('aria-label')||'').toLowerCase();
@@ -133,7 +247,6 @@ def _open_overflow(page) -> bool:
             """
         )
         if ok:
-            page.locator('div[role]="menu"')
             page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
             return True
     except Exception:
@@ -230,81 +343,81 @@ def _block_ui_sync(page) -> bool:
 def block_handles_sync(handles: List[str]) -> List[BlockResult]:
     rl = RateLimiterSync(max_actions=settings.actions_per_15min)
     out: List[BlockResult] = []
-    with sync_playwright() as p:
-        # Prefer persistent context to keep login
-        ctx = None
-        browser = None
-        if settings.user_data_dir:
-            ctx = p.chromium.launch_persistent_context(
-                settings.user_data_dir,
-                headless=settings.headless,
-                args=settings.chromium_args,
-                user_agent=settings.user_agent,
-            )
-        else:
-            browser = p.chromium.launch(headless=settings.headless, args=settings.chromium_args)
-            ctx = browser.new_context(user_agent=settings.user_agent)
-        ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
+    pw, browser, ctx, owned = _ensure_ctx()
+    if ctx is None:
+        return [BlockResult(handle=h, ok=False, error="ctx_unavailable") for h in handles]
+    page = ctx.new_page()
+    try:
+        page.set_viewport_size({"width": 1280, "height": 900})
+    except Exception:
+        pass
+    try:
+        page.set_default_timeout(1500)
+        page.set_default_navigation_timeout(5000)
+    except Exception:
+        pass
 
-        page = ctx.new_page()
+    for h in handles:
+        handle = h if h.startswith("@") else f"@{h}"
+        url = f"https://x.com/{handle.lstrip('@')}"
         try:
-            page.set_viewport_size({"width": 1280, "height": 900})
-        except Exception:
-            pass
-        try:
-            page.set_default_timeout(1500)
-            page.set_default_navigation_timeout(5000)
-        except Exception:
-            pass
-        for h in handles:
-            handle = h if h.startswith("@") else f"@{h}"
-            url = f"https://x.com/{handle.lstrip('@')}"
+            rl.tick()
+            page.goto(url, wait_until="domcontentloaded", timeout=5000)
+            _ensure_view_profile(page)
+            _home_scroll(page)
+            _debug_shot(page, handle, "loaded")
+
+            # If not logged in UI is missing actions; give clearer error
             try:
-                rl.tick()
-                page.goto(url, wait_until="domcontentloaded", timeout=5000)
-                _ensure_view_profile(page)
-                _home_scroll(page)
-                _debug_shot(page, handle, "loaded")
-
-                # If not logged in UI is missing actions; give clearer error
-                try:
-                    page.locator('[data-testid="userActions"]').wait_for(state="attached", timeout=1200)
-                except Exception:
-                    _debug_shot(page, handle, "no_user_actions")
-                    out.append(BlockResult(handle=handle, ok=False, error="not_logged_in_or_ui_changed"))
-                    rl.jitter()
-                    continue
-
-                ok = _block_ui_sync(page)
-                _debug_shot(page, handle, "after_block_attempt")
+                page.locator('[data-testid="userActions"]').wait_for(state="attached", timeout=1200)
+            except Exception:
+                _debug_shot(page, handle, "no_user_actions")
+                out.append(BlockResult(handle=handle, ok=False, error="not_logged_in_or_ui_changed"))
                 rl.jitter()
-                br = BlockResult(handle=handle, ok=ok, error=None if ok else "ui_failed")
-                out.append(br)
-                try:
-                    save_block_result(br)
-                except Exception:
-                    pass
-            except PwTimeout:
-                _debug_shot(page, handle, "timeout")
-                br = BlockResult(handle=handle, ok=False, error="timeout")
-                out.append(br)
-                try:
-                    save_block_result(br)
-                except Exception:
-                    pass
-            except Exception as e:
-                _debug_shot(page, handle, "exception")
-                br = BlockResult(handle=handle, ok=False, error=str(e))
-                out.append(br)
-                try:
-                    save_block_result(br)
-                except Exception:
-                    pass
+                continue
 
-        if browser:
-            browser.close()
-        else:
+            ok = _block_ui_sync(page)
+            _debug_shot(page, handle, "after_block_attempt")
+            rl.jitter()
+            br = BlockResult(handle=handle, ok=ok, error=None if ok else "ui_failed")
+            out.append(br)
+            try:
+                save_block_result(br)
+            except Exception:
+                pass
+        except PwTimeout:
+            _debug_shot(page, handle, "timeout")
+            br = BlockResult(handle=handle, ok=False, error="timeout")
+            out.append(br)
+            try:
+                save_block_result(br)
+            except Exception:
+                pass
+        except Exception as e:
+            _debug_shot(page, handle, "exception")
+            br = BlockResult(handle=handle, ok=False, error=str(e))
+            out.append(br)
+            try:
+                save_block_result(br)
+            except Exception:
+                pass
+
+    # Close only if we created this context locally
+    if owned:
+        try:
             ctx.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
     return out
 
 

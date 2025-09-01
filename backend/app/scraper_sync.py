@@ -1,5 +1,6 @@
 from typing import List, Optional, Callable
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright.sync_api import TimeoutError as PwTimeout
+from .actions import _ensure_ctx
 from .config import settings
 from .types import Profile
 from .storage import write_profile_cache, save_dataset_entry, now_iso
@@ -50,40 +51,47 @@ def _parse_profile_cell(cell, query: str) -> Optional[Profile]:
 
 
 def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
+    """Incrementally harvest visible cells each scroll, tracking uniques.
+
+    This avoids relying on DOM indices (which shift under virtualization)
+    and instead parses all currently visible UserCells every iteration.
+    """
     cells = page.locator('[data-testid="UserCell"]')
     out_by_handle: dict[str, Profile] = {}
-    last_index = 0
-    stable = 0
-    last_count = 0
     max_iters = max(10, int(settings.scrape_scroll_max_iters))
     step = max(600, int(settings.scrape_scroll_step_px))
+    stable = 0
+    last_uniques = 0
+
     for _ in range(max_iters):
         count = cells.count()
-        # harvest newly visible cells since last_index
-        new_total = min(count, max_results)
         added_step: List[Profile] = []
-        for i in range(last_index, new_total):
+        # Parse all currently visible cells (windowed list)
+        for i in range(count):
             prof = _parse_profile_cell(cells.nth(i), query)
             if prof and prof.handle not in out_by_handle:
                 out_by_handle[prof.handle] = prof
                 added_step.append(prof)
                 if len(out_by_handle) >= max_results:
                     break
-        last_index = new_total
+        # Emit progress
         if on_new and added_step:
             try:
                 on_new(added_step, len(out_by_handle), max_results)
             except Exception:
                 pass
+        # Stop conditions
         if len(out_by_handle) >= max_results:
             break
-        # stability tracking
-        if count == last_count:
+        # Stability is based on unique growth, not DOM count
+        if len(out_by_handle) == last_uniques:
             stable += 1
         else:
             stable = 0
-            last_count = count
-        # scroll last cell into view and wheel further
+            last_uniques = len(out_by_handle)
+        if stable >= max(3, int(settings.scrape_scroll_stable_iters)):
+            break
+        # Scroll to load more
         try:
             if count > 0:
                 cells.nth(count - 1).scroll_into_view_if_needed(timeout=800)
@@ -97,24 +105,7 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
             except Exception:
                 pass
         page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
-        if stable >= max(3, int(settings.scrape_scroll_stable_iters)):
-            break
-    # Final harvest in case there were new items after last wait
-    count = cells.count()
-    new_total = min(count, max_results)
-    added_final: List[Profile] = []
-    for i in range(last_index, new_total):
-        prof = _parse_profile_cell(cells.nth(i), query)
-        if prof and prof.handle not in out_by_handle:
-            out_by_handle[prof.handle] = prof
-            added_final.append(prof)
-            if len(out_by_handle) >= max_results:
-                break
-    if on_new and added_final:
-        try:
-            on_new(added_final, len(out_by_handle), max_results)
-        except Exception:
-            pass
+
     return list(out_by_handle.values())
 
 
@@ -159,46 +150,94 @@ def _scroll_for_more(page, max_results: int):
 
 
 def scrape_search_users_sync(query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
-    with sync_playwright() as p:
-        # Prefer persistent context to preserve login session
-        ctx = None
-        browser = None
-        if settings.user_data_dir:
-            ctx = p.chromium.launch_persistent_context(
-                settings.user_data_dir,
-                headless=settings.headless,
-                args=settings.chromium_args,
-                user_agent=settings.user_agent,
-                slow_mo=settings.slow_mo_ms,
-            )
-        else:
-            browser = p.chromium.launch(
-                headless=settings.headless,
-                args=settings.chromium_args,
-                slow_mo=settings.slow_mo_ms,
-            )
-            ctx = browser.new_context(user_agent=settings.user_agent)
+    pw, browser, ctx, owned = _ensure_ctx()
+    if ctx is None:
+        return []
 
-        # Reduce automation fingerprints
+    # Reduce automation fingerprints
+    try:
         ctx.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         """)
+    except Exception:
+        pass
 
-        page = ctx.new_page()
-        page.goto(SEARCH_URL.format(q=query))
-        # allow manual login... or already logged session cookies
-        page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    page = ctx.new_page()
+    page.goto(SEARCH_URL.format(q=query))
+    # allow manual login... or already logged session cookies
+    page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    try:
+        page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
+    except PwTimeout:
+        profiles = []
+    else:
+        # incrementally collect unique profiles while scrolling (calls on_new as items appear)
+        profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
+
+    # Close only if we created this context here
+    if owned:
         try:
-            page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
-        except PwTimeout:
-            profiles = []
-        else:
-            # incrementally collect unique profiles while scrolling (calls on_new as items appear)
-            profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
-        if browser:
-            browser.close()
-        else:
             ctx.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+
+    for prof in profiles:
+        write_profile_cache(prof)
+        save_dataset_entry(prof)
+    return profiles
+
+
+def scrape_user_list_sync(username: str, list_type: str = "followers", max_results: int = 100, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
+    user = username.lstrip('@')
+    segment = "followers" if list_type.lower() == "followers" else "following"
+    url = f"https://x.com/{user}/{segment}"
+    pw, browser, ctx, owned = _ensure_ctx()
+    if ctx is None:
+        return []
+
+    try:
+        ctx.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        """)
+    except Exception:
+        pass
+
+    page = ctx.new_page()
+    page.goto(url)
+    page.wait_for_timeout(max(800, int(settings.slow_mo_ms)))
+    try:
+        page.wait_for_selector('[data-testid="UserCell"]', timeout=15000)
+    except PwTimeout:
+        profiles: List[Profile] = []
+    else:
+        profiles = _collect_profiles_incremental(page, query=f"{segment}:{user}", max_results=max_results, on_new=on_new)
+
+    if owned:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+        try:
+            if pw:
+                pw.stop()
+        except Exception:
+            pass
+
     for prof in profiles:
         write_profile_cache(prof)
         save_dataset_entry(prof)

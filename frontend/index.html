@@ -1,0 +1,308 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>gpt5 vs x spam</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --bg:#0b0f14; --panel:#121826; --text:#e5e7eb; --muted:#94a3b8; --accent:#38bdf8; --bad:#f43f5e; --ok:#34d399; --radius:12px }
+    html,body { margin:0; padding:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial }
+    .wrap { max-width:1100px; margin:0 auto; padding:16px }
+    .bar { display:flex; gap:8px; align-items:center; background:var(--panel); padding:10px; border-radius:var(--radius) }
+    input,button { font:inherit }
+    input[type=text] { flex:1; background:#0b1220; color:var(--text); border:1px solid #223; padding:10px 12px; border-radius:10px }
+    button { background:var(--accent); border:0; color:#001018; padding:10px 14px; border-radius:10px; cursor:pointer }
+    .grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:12px; margin-top:12px }
+    .card { background:var(--panel); padding:12px; border:1px solid #1e293b; border-radius:var(--radius) }
+    .handle { font-weight:700 }
+    .bio { color:var(--muted); font-size:14px; white-space:pre-wrap }
+    .label { display:inline-block; font-size:12px; padding:3px 8px; border-radius:999px; border:1px solid #234; margin-top:6px }
+    .label.bad { background:#331218; color:#ffd6db; border-color:#4e1a24 }
+    .label.ok { background:#10291f; color:#d6ffee; border-color:#1a4e36 }
+    .row { display:flex; gap:8px; align-items:center; margin-top:8px }
+    .small { color:var(--muted); font-size:12px }
+  </style>
+  <script>
+    // small helper to target the FastAPI server on 127.0.0.1:8000
+    function api(path, opts={}){
+      const base = 'http://127.0.0.1:8000';
+      return fetch(base + path, opts).then(r=>r.json());
+    }
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>gpt5 vs x spam</h1>
+    <div class="bar" style="margin-bottom:8px; gap:8px;">
+      <button id="tabSearch" class="btn ok" style="min-width:120px;">Search</button>
+      <button id="tabHistory" class="btn secondary" style="min-width:120px;">History</button>
+    </div>
+    <div class="bar" style="flex-wrap: wrap; gap:12px">
+      <input id="q" type="text" placeholder="maye musk">
+      <input id="maxN" type="number" min="1" max="100" value="40" style="width:110px" title="max results">
+      <label class="small"><input id="doClass" type="checkbox" checked> classify</label>
+      <select id="vendor" title="vendor preset" style="background:#0b1220; color:var(--text); border:1px solid #223; padding:9px; border-radius:10px">
+        <option value="custom">Custom</option>
+        <option value="local">LM Studio (local)</option>
+        <option value="ollama">Ollama (OpenAI compat)</option>
+        <option value="openai">OpenAI</option>
+        <option value="openrouter">OpenRouter</option>
+      </select>
+      <input id="apiBase" type="text" placeholder="API base (e.g. http://127.0.0.1:1234/v1)" style="min-width:260px">
+      <input id="modelId" type="text" placeholder="model id (e.g. gpt-4o-mini)" style="min-width:200px">
+      <input id="apiKey" type="password" placeholder="api key (optional)" style="min-width:200px">
+      <button id="run">run</button>
+    </div>
+    <div id="note" class="small" style="margin-top:8px">log into x in the scraper window... results will appear below...</div>
+    <div id="prog" class="small" style="margin-top:6px;color:#9ca3af"></div>
+    <div id="out" class="grid"></div>
+    <div id="historyPane" style="display:none">
+      <div class="card">
+        <div class="row" style="gap:10px; align-items:center;">
+          <label>Day</label>
+          <select id="histDay"></select>
+          <label>Type</label>
+          <select id="histType">
+            <option value="all">all</option>
+            <option value="block">block</option>
+            <option value="classification">classification</option>
+          </select>
+          <button id="loadHist" class="btn secondary">Load</button>
+        </div>
+        <div id="histCounts" class="small" style="margin-top:6px"></div>
+      </div>
+      <div id="histList" class="grid" style="margin-top:10px"></div>
+    </div>
+  </div>
+
+  <script>
+  const save = () => {
+    const obj = {
+      vendor: vendor.value,
+      apiBase: apiBase.value,
+      modelId: modelId.value,
+      apiKey: apiKey.value,
+      maxN: maxN.value,
+      classify: doClass.checked
+    };
+    try { localStorage.setItem('gpt5x.settings', JSON.stringify(obj)); } catch {}
+  };
+
+  const load = () => {
+    try {
+      const s = JSON.parse(localStorage.getItem('gpt5x.settings')||'{}');
+      if (s.vendor) vendor.value = s.vendor;
+      if (s.apiBase) apiBase.value = s.apiBase;
+      if (s.modelId) modelId.value = s.modelId;
+      if (s.apiKey) apiKey.value = s.apiKey;
+      if (s.maxN) maxN.value = s.maxN;
+      if (typeof s.classify === 'boolean') doClass.checked = s.classify;
+    } catch {}
+  };
+
+  const applyVendor = () => {
+    const v = vendor.value;
+    if (v === 'local') apiBase.value = 'http://127.0.0.1:1234/v1';
+    else if (v === 'ollama') apiBase.value = 'http://127.0.0.1:11434/v1';
+    else if (v === 'openai') apiBase.value = 'https://api.openai.com/v1';
+    else if (v === 'openrouter') apiBase.value = 'https://openrouter.ai/api/v1';
+    save();
+  };
+
+  const vendor = document.getElementById('vendor');
+  const apiBase = document.getElementById('apiBase');
+  const modelId = document.getElementById('modelId');
+  const apiKey = document.getElementById('apiKey');
+  const maxN = document.getElementById('maxN');
+  const doClass = document.getElementById('doClass');
+
+  load();
+  vendor.addEventListener('change', applyVendor);
+  [apiBase, modelId, apiKey, maxN, doClass].forEach(el => el.addEventListener('change', save));
+
+  // Tabs: Search vs History
+  const tabSearch = document.getElementById('tabSearch');
+  const tabHistory = document.getElementById('tabHistory');
+  const historyPane = document.getElementById('historyPane');
+  const bars = document.querySelectorAll('.bar');
+  const searchControls = bars[1];
+  function showSearch(){
+    tabSearch.className='btn ok'; tabHistory.className='btn secondary';
+    historyPane.style.display='none';
+    searchControls.style.display='flex';
+    document.getElementById('note').style.display='block';
+    document.getElementById('prog').style.display='block';
+    document.getElementById('out').style.display='grid';
+  }
+  function showHistory(){
+    tabSearch.className='btn secondary'; tabHistory.className='btn ok';
+    historyPane.style.display='block';
+    searchControls.style.display='none';
+    document.getElementById('note').style.display='none';
+    document.getElementById('prog').style.display='none';
+    document.getElementById('out').style.display='none';
+    initHistory();
+  }
+  tabSearch.addEventListener('click', showSearch);
+  tabHistory.addEventListener('click', showHistory);
+
+  function renderProfiles(list) {
+    const out = document.getElementById('out');
+    const existing = new Set(Array.from(out.querySelectorAll('[data-handle]')).map(el=>el.getAttribute('data-handle')));
+    for (const p of list) {
+      if (existing.has(p.handle)) continue;
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.setAttribute('data-handle', p.handle);
+      div.innerHTML = `
+        <div class="row" style="gap:10px; align-items:center;">
+          ${p.avatar_url ? `<img src="${p.avatar_url}" alt="avatar" width="40" height="40" style="border-radius:999px; border:1px solid #1e293b; object-fit:cover">` : ''}
+          <div>
+            <div class="handle">${p.name || ''} <span class="small">${p.handle}</span></div>
+            <div class="small">${p.profile_url ? `<a href="${p.profile_url}" target="_blank" style="color:#9ae8ff">open</a>` : ''}</div>
+          </div>
+        </div>
+        <div class="bio" style="margin-top:6px;">${p.bio || ''}</div>
+        <div class="label" data-label style="display:none; margin-top:8px;"></div>
+        <div class="small" data-reasons style="display:none; margin-top:4px; color:#9ca3af"></div>
+        <div class="row small" style="margin-top:8px">
+          <label><input type="checkbox" class="blk" value="${p.handle}"> queue block</label>
+        </div>
+      `;
+      out.appendChild(div);
+    }
+  }
+
+  function renderClassifications(classes) {
+    const map = {};
+    classes.forEach(c => map[c.handle] = c);
+    const cards = document.querySelectorAll('#out [data-handle]');
+    cards.forEach(card => {
+      const h = card.getAttribute('data-handle');
+      const c = map[h];
+      const badge = card.querySelector('[data-label]');
+      const rs = card.querySelector('[data-reasons]');
+      if (!c || !badge) return;
+      const bad = c.label.startsWith('likely_') && c.label !== 'likely_legit';
+      badge.className = 'label ' + (bad ? 'bad' : 'ok');
+      badge.style.display = 'inline-block';
+      badge.textContent = `${c.label}... ${(c.confidence*100).toFixed(0)}%`;
+      if (rs) {
+        const reasons = Array.isArray(c.reasons) ? c.reasons : [];
+        if (reasons.length) {
+          rs.style.display = 'block';
+          rs.textContent = reasons.join(' • ');
+        }
+      }
+    });
+  }
+
+  function selectLikelyImpersonators() {
+    const handles = [];
+    document.querySelectorAll('#out [data-handle]').forEach(card => {
+      const badge = card.querySelector('[data-label]');
+      const h = card.getAttribute('data-handle');
+      if (badge && /likely_impersonation/i.test(badge.textContent||'')) {
+        const chk = card.querySelector('.blk');
+        if (chk) { chk.checked = true; handles.push(h); }
+      }
+    });
+    return handles;
+  }
+
+  function attachBlockButtons() {
+    // block queued
+    const blk = () => Array.from(document.querySelectorAll('.blk'));
+    window.queueBlock = async () => {
+      const handles = blk().filter(x => x.checked).map(x => x.value);
+      if (!handles.length) return alert('no handles selected...');
+      const res = await api('/api/block', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(handles) });
+      alert('block results...\n' + JSON.stringify(res, null, 2));
+    };
+    if (!document.getElementById('blkbtn')) {
+      const wrap = document.querySelector('.wrap');
+      const b = document.createElement('button');
+      b.id = 'blkbtn'; b.style.marginTop = '8px';
+      b.innerText = 'run block on selected';
+      b.onclick = window.queueBlock;
+      wrap.appendChild(b);
+
+      const s = document.createElement('button');
+      s.id = 'selimp'; s.style.marginTop = '8px'; s.style.marginLeft = '8px';
+      s.className = 'btn secondary';
+      s.innerText = 'select likely impersonators';
+      s.onclick = () => { const hs = selectLikelyImpersonators(); alert(`selected ${hs.length}`); };
+      wrap.appendChild(s);
+    }
+  }
+
+  document.getElementById('run').onclick = async () => {
+    const q = document.getElementById('q').value || 'maye musk';
+    const cls = doClass.checked;
+    const maxResults = parseInt(maxN.value || '40', 10) || 40;
+    const base = (apiBase.value || '').trim();
+    const model = (modelId.value || '').trim();
+    const provider = vendor.value;
+    const key = (apiKey.value || '').trim();
+    save();
+    const outEl = document.getElementById('out');
+    outEl.innerHTML = '';
+    const prog = document.getElementById('prog');
+    prog.textContent = 'starting...';
+    const qp = new URLSearchParams({
+      query: q,
+      classify: String(cls),
+      max_results: String(maxResults)
+    });
+    if (provider && provider !== 'custom') qp.set('llm_provider', provider);
+    if (base) qp.set('llm_api_base', base);
+    if (model) qp.set('llm_model', model);
+    const sseUrl = `${'http://127.0.0.1:8000'}/api/search_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
+    const es = new EventSource(sseUrl);
+    es.addEventListener('status', (ev) => {
+      try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; }
+    });
+    es.addEventListener('profiles', (ev) => {
+      try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {}
+    });
+    es.addEventListener('classification', (ev) => {
+      try { const list = JSON.parse(ev.data); renderClassifications(list); } catch {}
+    });
+    es.addEventListener('done', () => { prog.textContent = 'done'; es.close(); });
+  };
+
+  // --------- History UI
+  async function initHistory(){
+    try{
+      const days = await api('/api/history/days');
+      const sel = document.getElementById('histDay');
+      sel.innerHTML='';
+      for(const d of (days.days||[])){
+        const o=document.createElement('option'); o.value=d.day; o.textContent=`${d.day} — blocks:${d.counts.block||0} cls:${d.counts.classification||0}`; sel.appendChild(o);
+      }
+      document.getElementById('histCounts').textContent = `${(days.days||[]).length} days`;
+      if(sel.options.length){ sel.value=sel.options[0].value; await loadHist(); }
+    }catch(e){ document.getElementById('histCounts').textContent = 'failed to load days'; }
+  }
+  async function loadHist(){
+    const day = document.getElementById('histDay').value;
+    const typ = document.getElementById('histType').value;
+    const data = await api(`/api/history/items?day=${encodeURIComponent(day)}&typ=${encodeURIComponent(typ)}&limit=200`);
+    const list = document.getElementById('histList');
+    list.innerHTML='';
+    for(const it of (data.items||[])){
+      const div = document.createElement('div'); div.className='card';
+      if(it.__type==='block'){
+        div.innerHTML = `<div class="handle">${it.handle}</div><div class="small">${it.saved_at||''}</div><div class="label ${it.ok?'ok':'bad'}">${it.ok?'blocked':'failed'}</div>${it.error?`<div class="small" style="color:#9ca3af">${it.error}</div>`:''}`;
+      }else{
+        const bad = it.label && it.label.startsWith('likely_') && it.label!=='likely_legit';
+        const reasons = Array.isArray(it.reasons)? it.reasons.join(' • ') : '';
+        div.innerHTML = `<div class="handle">${it.handle}</div><div class="small">${it.saved_at||''}</div><div class="label ${bad?'bad':'ok'}">${it.label} ${(it.confidence*100||0).toFixed(0)}%</div>${reasons?`<div class="small" style="color:#9ca3af">${reasons}</div>`:''}`;
+      }
+      list.appendChild(div);
+    }
+  }
+  document.getElementById('loadHist').addEventListener('click', loadHist);
+  </script>
+</body>
+ </html>

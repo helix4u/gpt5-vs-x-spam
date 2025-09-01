@@ -1,9 +1,10 @@
-from fastapi import FastAPI, Query, Header, Body
+from fastapi import FastAPI, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import asyncio
 from .types import SearchResponse, Profile, Classification, BlockResult
 from .scraper import scrape_search_users
+from .scraper_sync import scrape_search_users_sync as scrape_sync
 from .classifier import classify_profiles
 from .actions import block_handles
 from .storage import save_classification, read_jsonl
@@ -90,7 +91,55 @@ async def api_search_stream(
         yield _sse_pack("status", {"message": "starting", "query": query})
         yield _sse_pack("status", {"message": "navigating"})
         yield _sse_pack("status", {"message": "scraping"})
-        profiles: List[Profile] = await scrape_search_users(query, max_results=max_results)
+
+        # progress streaming via queue
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def on_new(added_profiles: List[Profile], count: int, target: int):
+            try:
+                payload = {
+                    "added": [p.model_dump() for p in added_profiles],
+                    "count": count,
+                    "target": target,
+                }
+                loop.call_soon_threadsafe(queue.put_nowait, ("progress", payload))
+            except Exception:
+                pass
+
+        # run scraper in thread
+        async def run_scrape():
+            return await asyncio.to_thread(scrape_sync, query, max_results, on_new)
+
+        scrape_task = asyncio.create_task(run_scrape())
+
+        profiles: List[Profile] = []
+        scraping = True
+        while scraping:
+            done, pending = await asyncio.wait(
+                {scrape_task, asyncio.create_task(queue.get())},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if scrape_task in done:
+                profiles = scrape_task.result()
+                # drain queue for any remaining progress
+                while not queue.empty():
+                    kind, data = await queue.get()
+                    if kind == "progress":
+                        yield _sse_pack("progress", data)
+                        if data.get("added"):
+                            yield _sse_pack("profiles_chunk", data["added"])  # optional
+                scraping = False
+                break
+            else:
+                # we got a progress item
+                kind, data = list(done)[0].result()
+                if kind == "progress":
+                    yield _sse_pack("progress", data)
+                    if data.get("added"):
+                        yield _sse_pack("profiles_chunk", data["added"])  # optional
+
+        # final payload
         yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
         yield _sse_pack("profiles", [p.model_dump() for p in profiles])
         if classify and profiles:
@@ -143,17 +192,3 @@ async def api_history_items(day: str, typ: str = "all", limit: int = 100, offset
         out.append(r)
     out.sort(key=lambda x: x.get("saved_at", ""), reverse=True)
     return {"items": out[offset : offset + limit], "total": len(out)}
-
-
-@app.post("/api/block_from_post", response_model=List[BlockResult])
-async def api_block_from_post(payload: dict = Body(...)):
-    from .actions import handles_from_post
-    url = payload.get("url", "").strip()
-    kind = (payload.get("kind") or "any").strip().lower()
-    limit = int(payload.get("limit", 100))
-    if not url:
-        return []
-    handles = await handles_from_post(url, kind=kind, limit=limit)
-    if not handles:
-        return []
-    return await block_handles(handles)

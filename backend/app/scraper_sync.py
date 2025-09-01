@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional, Callable
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from .config import settings
 from .types import Profile
@@ -14,47 +14,108 @@ def _safe_inner_text(locator) -> str | None:
         return None
 
 
-def _extract_profiles(page, query: str, max_results: int = 40) -> List[Profile]:
-    results: List[Profile] = []
+def _parse_profile_cell(cell, query: str) -> Optional[Profile]:
+    try:
+        texts = cell.locator("span").all_inner_texts()
+        handle = next((t for t in texts if t.strip().startswith("@")), None)
+        name = texts[0] if texts else None
+
+        bio_el = cell.locator('[dir="auto"]').last
+        bio = _safe_inner_text(bio_el)
+
+        a = cell.locator("a").first
+        href = a.get_attribute("href")
+        profile_url = f"https://x.com{href}" if href and href.startswith("/") else href
+
+        avatar = cell.locator('img[src*="profile_images"]').first
+        avatar_url = avatar.get_attribute("src")
+
+        verified_count = cell.locator('[data-testid="icon-verified"]').count()
+        verified = verified_count > 0
+
+        if not handle:
+            return None
+        return Profile(
+            name=name,
+            handle=handle,
+            profile_url=profile_url,
+            avatar_url=avatar_url,
+            bio=bio,
+            verified=verified,
+            scraped_at=now_iso(),
+            query=query,
+        )
+    except Exception:
+        return None
+
+
+def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
     cells = page.locator('[data-testid="UserCell"]')
-    total = cells.count()
-    limit = min(total, max_results)
-    for i in range(limit):
-        cell = cells.nth(i)
+    out_by_handle: dict[str, Profile] = {}
+    last_index = 0
+    stable = 0
+    last_count = 0
+    max_iters = max(10, int(settings.scrape_scroll_max_iters))
+    step = max(600, int(settings.scrape_scroll_step_px))
+    for _ in range(max_iters):
+        count = cells.count()
+        # harvest newly visible cells since last_index
+        new_total = min(count, max_results)
+        added_step: List[Profile] = []
+        for i in range(last_index, new_total):
+            prof = _parse_profile_cell(cells.nth(i), query)
+            if prof and prof.handle not in out_by_handle:
+                out_by_handle[prof.handle] = prof
+                added_step.append(prof)
+                if len(out_by_handle) >= max_results:
+                    break
+        last_index = new_total
+        if on_new and added_step:
+            try:
+                on_new(added_step, len(out_by_handle), max_results)
+            except Exception:
+                pass
+        if len(out_by_handle) >= max_results:
+            break
+        # stability tracking
+        if count == last_count:
+            stable += 1
+        else:
+            stable = 0
+            last_count = count
+        # scroll last cell into view and wheel further
         try:
-            texts = cell.locator("span").all_inner_texts()
-            handle = next((t for t in texts if t.strip().startswith("@")), None)
-            name = texts[0] if texts else None
-
-            bio_el = cell.locator('[dir="auto"]').last
-            bio = _safe_inner_text(bio_el)
-
-            a = cell.locator("a").first
-            href = a.get_attribute("href")
-            profile_url = f"https://x.com{href}" if href and href.startswith("/") else href
-
-            avatar = cell.locator('img[src*="profile_images"]').first
-            avatar_url = avatar.get_attribute("src")
-
-            verified_count = cell.locator('[data-testid="icon-verified"]').count()
-            verified = verified_count > 0
-
-            if not handle:
-                continue
-            p = Profile(
-                name=name,
-                handle=handle,
-                profile_url=profile_url,
-                avatar_url=avatar_url,
-                bio=bio,
-                verified=verified,
-                scraped_at=now_iso(),
-                query=query,
-            )
-            results.append(p)
+            if count > 0:
+                cells.nth(count - 1).scroll_into_view_if_needed(timeout=800)
         except Exception:
-            continue
-    return results
+            pass
+        try:
+            page.mouse.wheel(0, step)
+        except Exception:
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", step)
+            except Exception:
+                pass
+        page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
+        if stable >= max(3, int(settings.scrape_scroll_stable_iters)):
+            break
+    # Final harvest in case there were new items after last wait
+    count = cells.count()
+    new_total = min(count, max_results)
+    added_final: List[Profile] = []
+    for i in range(last_index, new_total):
+        prof = _parse_profile_cell(cells.nth(i), query)
+        if prof and prof.handle not in out_by_handle:
+            out_by_handle[prof.handle] = prof
+            added_final.append(prof)
+            if len(out_by_handle) >= max_results:
+                break
+    if on_new and added_final:
+        try:
+            on_new(added_final, len(out_by_handle), max_results)
+        except Exception:
+            pass
+    return list(out_by_handle.values())
 
 
 def _scroll_for_more(page, max_results: int):
@@ -97,7 +158,7 @@ def _scroll_for_more(page, max_results: int):
             break
 
 
-def scrape_search_users_sync(query: str, max_results: int = 40) -> List[Profile]:
+def scrape_search_users_sync(query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
     with sync_playwright() as p:
         # Prefer persistent context to preserve login session
         ctx = None
@@ -132,9 +193,8 @@ def scrape_search_users_sync(query: str, max_results: int = 40) -> List[Profile]
         except PwTimeout:
             profiles = []
         else:
-            # attempt to scroll to load more up to requested max_results
-            _scroll_for_more(page, max_results=max_results)
-            profiles = _extract_profiles(page, query, max_results=max_results)
+            # incrementally collect unique profiles while scrolling (calls on_new as items appear)
+            profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
         if browser:
             browser.close()
         else:

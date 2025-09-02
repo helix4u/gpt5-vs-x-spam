@@ -1,5 +1,5 @@
 import asyncio, random, time, re
-from typing import List
+from typing import List, Callable
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from .config import settings
 from .types import BlockResult
@@ -116,14 +116,28 @@ class RateLimiterSync:
         self.window_sec = window_sec
         self.actions: list[float] = []
 
-    def tick(self):
-        now = time.time()
-        self.actions = [t for t in self.actions if now - t < self.window_sec]
-        if len(self.actions) >= self.max_actions:
+    def tick(self, on_wait: Callable[[int], None] | None = None) -> int:
+        """Record an action; if at limit, sleep until a slot frees.
+
+        Returns the total seconds slept (0 if none). Optionally invokes
+        on_wait(seconds_remaining) before sleeping each time.
+        """
+        slept = 0
+        while True:
+            now = time.time()
+            self.actions = [t for t in self.actions if now - t < self.window_sec]
+            if len(self.actions) < self.max_actions:
+                self.actions.append(now)
+                return int(slept)
             wait = self.window_sec - (now - self.actions[0]) + 1
-            time.sleep(max(1, int(wait)))
-            return self.tick()
-        self.actions.append(now)
+            seconds = max(1, int(wait))
+            if on_wait:
+                try:
+                    on_wait(seconds)
+                except Exception:
+                    pass
+            time.sleep(seconds)
+            slept += seconds
 
     def jitter(self):
         # Tightened jitter — aim for human-ish but snappy (< ~260ms)
@@ -470,7 +484,7 @@ def _block_ui_sync(page) -> bool:
     return True
 
 
-def block_handles_sync(handles: List[str]) -> List[BlockResult]:
+def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult]:
     rl = RateLimiterSync(max_actions=settings.actions_per_15min)
     out: List[BlockResult] = []
     pw, browser, ctx, owned = _ensure_ctx()
@@ -491,7 +505,13 @@ def block_handles_sync(handles: List[str]) -> List[BlockResult]:
         handle = h if h.startswith("@") else f"@{h}"
         url = f"https://x.com/{handle.lstrip('@')}"
         try:
-            rl.tick()
+            def _notify_wait(sec: int):
+                if on_progress:
+                    try:
+                        on_progress({"kind": "rate_limit_wait", "seconds": int(sec)})
+                    except Exception:
+                        pass
+            rl.tick(on_wait=_notify_wait)
             page.goto(url, wait_until="domcontentloaded", timeout=5000)
             # Preemptively remove placements/spaces and disable sidebar clicks before any other interaction
             try:
@@ -539,6 +559,12 @@ def block_handles_sync(handles: List[str]) -> List[BlockResult]:
                 save_block_result(br)
             except Exception:
                 pass
+            # progress callback
+            if on_progress:
+                try:
+                    on_progress({"kind": "progress", "done": len(out), "total": len(handles), "result": br.model_dump()})
+                except Exception:
+                    pass
         except PwTimeout:
             _debug_shot(page, handle, "timeout")
             br = BlockResult(handle=handle, ok=False, error="timeout")
@@ -547,6 +573,11 @@ def block_handles_sync(handles: List[str]) -> List[BlockResult]:
                 save_block_result(br)
             except Exception:
                 pass
+            if on_progress:
+                try:
+                    on_progress({"kind": "progress", "done": len(out), "total": len(handles), "result": br.model_dump()})
+                except Exception:
+                    pass
         except Exception as e:
             _debug_shot(page, handle, "exception")
             br = BlockResult(handle=handle, ok=False, error=str(e))
@@ -555,6 +586,11 @@ def block_handles_sync(handles: List[str]) -> List[BlockResult]:
                 save_block_result(br)
             except Exception:
                 pass
+            if on_progress:
+                try:
+                    on_progress({"kind": "progress", "done": len(out), "total": len(handles), "result": br.model_dump()})
+                except Exception:
+                    pass
 
     # Close only if we created this context locally
     if owned:

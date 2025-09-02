@@ -5,7 +5,7 @@ import asyncio
 from .types import SearchResponse, Profile, Classification, BlockResult
 from .scraper_sync import scrape_search_users_sync as scrape_sync, scrape_user_list_sync
 from .classifier import classify_profiles
-from .actions import block_handles, open_login_window_sync
+from .actions import block_handles, block_handles_sync, open_login_window_sync
 from .storage import save_classification, read_jsonl
 from .config import settings
 from fastapi.responses import StreamingResponse
@@ -290,3 +290,54 @@ async def api_history_items(day: str, typ: str = "all", limit: int = 100, offset
 async def api_login():
     ok = await asyncio.to_thread(open_login_window_sync)
     return {"ok": bool(ok)}
+@app.get("/api/block_stream")
+async def api_block_stream(handles: str = Query(..., description="comma-separated handles")):
+    hs = [h.strip() for h in handles.split(',') if h.strip()]
+    async def gen():
+        total = len(hs)
+        yield _sse_pack("status", {"message": "starting", "total": total})
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def on_progress(evt: dict):
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, evt)
+            except Exception:
+                pass
+
+        async def run_block():
+            return await asyncio.to_thread(block_handles_sync, hs, on_progress)
+
+        task = asyncio.create_task(run_block())
+        results: List[BlockResult] = []
+        blocking = True
+        while blocking:
+            done, pending = await asyncio.wait({task, asyncio.create_task(queue.get())}, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                try:
+                    results = task.result()
+                except Exception as e:
+                    yield _sse_pack("error", {"message": "block_failed", "detail": str(e)})
+                    yield _sse_pack("done", {"ok": False})
+                    return
+                # drain
+                while not queue.empty():
+                    evt = await queue.get()
+                    if evt.get("kind") == "progress":
+                        yield _sse_pack("progress", evt)
+                    elif evt.get("kind") == "rate_limit_wait":
+                        yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": evt.get("seconds", 0)})
+                blocking = False
+                break
+            else:
+                evt = list(done)[0].result()
+                if evt.get("kind") == "progress":
+                    yield _sse_pack("progress", evt)
+                elif evt.get("kind") == "rate_limit_wait":
+                    yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": evt.get("seconds", 0)})
+
+        yield _sse_pack("status", {"message": "completed", "done": len(results), "total": total})
+        yield _sse_pack("results", [r.model_dump() for r in results])
+        yield _sse_pack("done", {"ok": True})
+
+    return StreamingResponse(gen(), media_type="text/event-stream")

@@ -8,6 +8,43 @@ from .storage import write_profile_cache, save_dataset_entry, now_iso
 SEARCH_URL = "https://x.com/search?q={q}&src=typed_query&f=user"
 
 
+def _init_strip_suggestions(page):
+    """Remove suggestion sidebars and keep them removed."""
+    try:
+        page.evaluate(
+            """
+            (function() {
+                const remove = () => {
+                    const sel = [
+                        'section[aria-label="Who to follow"]',
+                        'section[aria-label="Timeline: Who to follow"]',
+                        'section[aria-label="You might like"]',
+                        'aside[aria-label="Who to follow"]',
+                        'aside[aria-label="Timeline: Who to follow"]',
+                        'aside[aria-label="You might like"]'
+                    ].join(',');
+                    document.querySelectorAll(sel).forEach(el => el.remove());
+                    try {
+                        const xp = '/html/body/div[1]/div/div/div[2]/main/div/div/div/div[2]/div/div[2]/div/div/div/div[4]/div/aside';
+                        const node = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                        if (node) node.remove();
+                    } catch {}
+                };
+                // expose for manual re-use
+                window.__removeSuggestions = remove;
+                remove();
+                if (!window.__removeSuggestionsObserver) {
+                    const obs = new MutationObserver(remove);
+                    obs.observe(document.body, {subtree: true, childList: true});
+                    window.__removeSuggestionsObserver = obs;
+                }
+            })();
+            """
+        )
+    except Exception:
+        pass
+
+
 def _safe_inner_text(locator) -> str | None:
     try:
         return locator.inner_text()
@@ -50,6 +87,25 @@ def _parse_profile_cell(cell, query: str) -> Optional[Profile]:
         return None
 
 
+def _is_suggestion_cell(cell) -> bool:
+    """Check if a user cell belongs to a suggestion block."""
+    try:
+        return cell.evaluate(
+            """
+            el => el.closest(
+                'section[aria-label="Who to follow"],\
+                section[aria-label="Timeline: Who to follow"],\
+                section[aria-label="You might like"],\
+                aside[aria-label="Who to follow"],\
+                aside[aria-label="Timeline: Who to follow"],\
+                aside[aria-label="You might like"]'
+            ) !== null
+            """
+        )
+    except Exception:
+        return False
+
+
 def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_new: Optional[Callable[[List[Profile], int, int], None]] = None) -> List[Profile]:
     """Incrementally harvest visible cells each scroll, tracking uniques.
 
@@ -64,11 +120,18 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
     last_uniques = 0
 
     for _ in range(max_iters):
+        try:
+            page.evaluate("window.__removeSuggestions && window.__removeSuggestions();")
+        except Exception:
+            pass
         count = cells.count()
         added_step: List[Profile] = []
         # Parse all currently visible cells (windowed list)
         for i in range(count):
-            prof = _parse_profile_cell(cells.nth(i), query)
+            cell_i = cells.nth(i)
+            if _is_suggestion_cell(cell_i):
+                continue
+            prof = _parse_profile_cell(cell_i, query)
             if prof and prof.handle not in out_by_handle:
                 out_by_handle[prof.handle] = prof
                 added_step.append(prof)
@@ -171,6 +234,7 @@ def scrape_search_users_sync(query: str, max_results: int = 40, on_new: Optional
     except PwTimeout:
         profiles = []
     else:
+        _init_strip_suggestions(page)
         # incrementally collect unique profiles while scrolling (calls on_new as items appear)
         profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
 
@@ -220,6 +284,7 @@ def scrape_user_list_sync(username: str, list_type: str = "followers", max_resul
     except PwTimeout:
         profiles: List[Profile] = []
     else:
+        _init_strip_suggestions(page)
         profiles = _collect_profiles_incremental(page, query=f"{segment}:{user}", max_results=max_results, on_new=on_new)
 
     if owned:

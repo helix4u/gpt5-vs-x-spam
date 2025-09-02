@@ -171,26 +171,6 @@ def scrape_search_users_sync(query: str, max_results: int = 40, on_new: Optional
     except PwTimeout:
         profiles = []
     else:
-        try:
-            page.evaluate(
-                """
-                // Strip suggestion sidebars like "Who to follow" or "You might like"
-                const sel = [
-                  'section[aria-label="Who to follow"]',
-                  'section[aria-label="Timeline: Who to follow"]',
-                  'aside[aria-label="Who to follow"]',
-                  'aside[aria-label="Timeline: Who to follow"]'
-                ].join(',');
-                document.querySelectorAll(sel).forEach(el => el.remove());
-                try {
-                    const xp = '/html/body/div[1]/div/div/div[2]/main/div/div/div/div[2]/div/div[2]/div/div/div/div[4]/div/aside';
-                    const node = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                    if (node) node.remove();
-                } catch {}
-                """
-            )
-        except Exception:
-            pass
         # incrementally collect unique profiles while scrolling (calls on_new as items appear)
         profiles = _collect_profiles_incremental(page, query, max_results=max_results, on_new=on_new)
 
@@ -240,26 +220,6 @@ def scrape_user_list_sync(username: str, list_type: str = "followers", max_resul
     except PwTimeout:
         profiles: List[Profile] = []
     else:
-        try:
-            page.evaluate(
-                """
-                // Strip suggestion sidebars like "Who to follow" or "You might like"
-                const sel = [
-                  'section[aria-label="Who to follow"]',
-                  'section[aria-label="Timeline: Who to follow"]',
-                  'aside[aria-label="Who to follow"]',
-                  'aside[aria-label="Timeline: Who to follow"]'
-                ].join(',');
-                document.querySelectorAll(sel).forEach(el => el.remove());
-                try {
-                    const xp = '/html/body/div[1]/div/div/div[2]/main/div/div/div/div[2]/div/div[2]/div/div/div/div[4]/div/aside';
-                    const node = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                    if (node) node.remove();
-                } catch {}
-                """
-            )
-        except Exception:
-            pass
         profiles = _collect_profiles_incremental(page, query=f"{segment}:{user}", max_results=max_results, on_new=on_new)
 
     if owned:

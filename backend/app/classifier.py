@@ -134,6 +134,18 @@ async def classify_profiles(profiles: List[Profile], overrides: Optional[Dict[st
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": content},
     ]
-    resp = await _openai_chat(messages, overrides=overrides)
+    try:
+        resp = await _openai_chat(messages, overrides=overrides)
+    except Exception as e:
+        logging.getLogger(__name__).error("classification request failed: %s", e)
+        return [
+            Classification(
+                handle=p.handle,
+                label="uncertain",
+                confidence=0.0,
+                reasons=["connection_error"],
+            )
+            for p in profiles
+        ]
     txt = resp["choices"][0]["message"]["content"]
     return _coerce_output(txt, profiles)

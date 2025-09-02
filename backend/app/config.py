@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     # scraping scroll tuning
     scrape_scroll_wait_ms: int = Field(default=950)      # wait after each scroll
     scrape_scroll_step_px: int = Field(default=500)     # how far to scroll each step
-    scrape_scroll_max_iters: int = Field(default=250)    # max scroll attempts per search
-    scrape_scroll_stable_iters: int = Field(default=7)   # stop if no new cells after N steps
+    scrape_scroll_max_iters: int = Field(default=50)    # max scroll attempts per search
+    scrape_scroll_stable_iters: int = Field(default=3)   # stop if no new cells after N steps
 
     # api server bind
     api_host: str = Field(default_factory=lambda: os.getenv("API_HOST", "127.0.0.1"))

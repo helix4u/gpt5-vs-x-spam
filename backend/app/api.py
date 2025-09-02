@@ -149,7 +149,7 @@ async def api_search_stream(
         yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
         yield _sse_pack("profiles", [p.model_dump() for p in profiles])
         if classify and profiles:
-            yield _sse_pack("status", {"message": "classifying", "total": len(profiles)})
+            yield _sse_pack("status", {"message": "classifying"})
             overrides = {}
             if llm_provider:
                 overrides["provider"] = llm_provider
@@ -159,25 +159,10 @@ async def api_search_stream(
                 overrides["model"] = llm_model
             if openai_api_key:
                 overrides["api_key"] = openai_api_key
-
-            # chunked classification
-            chunk_size = 25
-            all_classes: List[Classification] = []
-            for i in range(0, len(profiles), chunk_size):
-                chunk = profiles[i:i+chunk_size]
-                try:
-                    yield _sse_pack("status", {"message": "classifying_chunk", "offset": i, "count": len(chunk)})
-                    chunk_classes = await classify_profiles(chunk, overrides=overrides)
-                    for c in chunk_classes:
-                        save_classification(c)
-                    all_classes.extend(chunk_classes)
-                    yield _sse_pack("classification_chunk", [c.model_dump() for c in chunk_classes])
-                    # adaptive sleep
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    yield _sse_pack("error", {"message": "classification_failed", "offset": i, "detail": str(e)})
-
-            yield _sse_pack("classification", [c.model_dump() for c in all_classes])
+            classes = await classify_profiles(profiles, overrides=overrides)
+            for c in classes:
+                save_classification(c)
+            yield _sse_pack("classification", [c.model_dump() for c in classes])
         yield _sse_pack("done", {"ok": True})
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -250,7 +235,7 @@ async def api_user_list_stream(
         yield _sse_pack("profiles", [p.model_dump() for p in profiles])
 
         if classify and profiles:
-            yield _sse_pack("status", {"message": "classifying", "total": len(profiles)})
+            yield _sse_pack("status", {"message": "classifying"})
             overrides = {}
             if llm_provider:
                 overrides["provider"] = llm_provider
@@ -260,25 +245,10 @@ async def api_user_list_stream(
                 overrides["model"] = llm_model
             if openai_api_key:
                 overrides["api_key"] = openai_api_key
-
-            # chunked classification
-            chunk_size = 25
-            all_classes: List[Classification] = []
-            for i in range(0, len(profiles), chunk_size):
-                chunk = profiles[i:i+chunk_size]
-                try:
-                    yield _sse_pack("status", {"message": "classifying_chunk", "offset": i, "count": len(chunk)})
-                    chunk_classes = await classify_profiles(chunk, overrides=overrides)
-                    for c in chunk_classes:
-                        save_classification(c)
-                    all_classes.extend(chunk_classes)
-                    yield _sse_pack("classification_chunk", [c.model_dump() for c in chunk_classes])
-                    # adaptive sleep
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    yield _sse_pack("error", {"message": "classification_failed", "offset": i, "detail": str(e)})
-
-            yield _sse_pack("classification", [c.model_dump() for c in all_classes])
+            classes = await classify_profiles(profiles, overrides=overrides)
+            for c in classes:
+                save_classification(c)
+            yield _sse_pack("classification", [c.model_dump() for c in classes])
         yield _sse_pack("done", {"ok": True})
 
     return StreamingResponse(gen(), media_type="text/event-stream")

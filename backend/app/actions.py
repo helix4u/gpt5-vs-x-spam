@@ -151,7 +151,6 @@ def _ensure_view_profile(page) -> None:
         'div[role="button"]:has-text("View profile")',
         'div[role="button"]:has-text("Yes, view profile")',
         'button:has-text("View profile")',
-        'button:has-text("View")',
     ]
     if _click_first(page, interstitial_selectors, timeout_ms=1200):
         page.wait_for_timeout(200)
@@ -175,6 +174,113 @@ def _debug_shot(page, handle: str, tag: str):
         pass
 
 
+def _strip_placements(page) -> None:
+    """Physically remove placement/Spaces widgets to prevent any interaction.
+
+    This is a belt-and-suspenders approach in addition to pointer-events: none.
+    """
+    try:
+        page.evaluate(
+            """
+            () => {
+              try {
+                document.querySelectorAll('[data-testid="placementTracking"]').forEach(n => n.remove());
+              } catch {}
+            }
+            """
+        )
+    except Exception:
+        pass
+
+
+def _dismiss_spaces_dialog(page) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              try {
+                const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+                for (const d of dialogs){
+                  const t = (d.innerText||'').toLowerCase();
+                  if (t.includes('start listening') || t.includes('listen anonymously') || t.includes('space ')){
+                    const btn = d.querySelector('[aria-label="Close"], [aria-label*="close" i], [data-testid="modalClose"], [role="button"][aria-label*="close" i]');
+                    if (btn) { try { btn.click(); } catch {} }
+                  }
+                }
+              } catch {}
+            }
+            """
+        )
+    except Exception:
+        pass
+
+
+def _is_forbidden_click(locator) -> bool:
+    """Return True if the node is part of Spaces/Live/placement/sidebar widgets.
+
+    This protects against accidental clicks even when fallback JS would match
+    an element inside primary content that still represents a Space/placement.
+    """
+    try:
+        return bool(
+            locator.evaluate(
+                """
+                (el) => {
+                  const xAllow = '/html/body/div[1]/div/div/div[2]/main/div/div/div/div[1]';
+                  const allowRoot = document.evaluate(xAllow, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                  const inAllowRoot = !!(allowRoot && (el === allowRoot || allowRoot.contains(el)));
+                  if (!inAllowRoot) return true;
+                  const has = (n, sel) => !!(n && (n.matches?.(sel) || n.closest?.(sel)));
+                  if (has(el, '[data-testid="sidebarColumn"]')) return true;
+                  if (has(el, '[data-testid="placementTracking"]')) return true;
+                  if (el.querySelector?.('[data-testid="pill-contents-container"]')) return true;
+                  // Heuristics on labels/text
+                  const badTerms = ['space', 'broadcast', 'is hosting', 'is listening', 'live on x'];
+                  const text = (el.innerText||'').toLowerCase();
+                  if (badTerms.some(t => text.includes(t))) return true;
+                  let n = el;
+                  while (n && n.nodeType === 1){
+                    const aria = (n.getAttribute?.('aria-label')||'').toLowerCase();
+                    if (badTerms.some(t => aria.includes(t))) return true;
+                    if (n.getAttribute?.('data-testid') === 'primaryColumn') break;
+                    n = n.parentElement;
+                  }
+                  // Geometric guard: click center must lie within allowRoot rect
+                  try {
+                    const r = el.getBoundingClientRect();
+                    const cx = r.left + r.width/2, cy = r.top + r.height/2;
+                    const ar = allowRoot.getBoundingClientRect();
+                    if (!(cx >= ar.left && cx <= ar.right && cy >= ar.top && cy <= ar.bottom)) return true;
+                  } catch {}
+                  return false;
+                }
+                """
+            )
+        )
+    except Exception:
+        return False
+
+
+def _safe_click(locator, wait_menu=False) -> bool:
+    try:
+        locator.wait_for(state="visible", timeout=1200)
+        if _is_forbidden_click(locator):
+            return False
+        # One more sweep before we click
+        try:
+            pg = locator.page
+            _strip_placements(pg)
+            _dismiss_spaces_dialog(pg)
+        except Exception:
+            pass
+        locator.click()
+        if wait_menu:
+            locator.page.locator('div[role="menu"]').last.wait_for(state="visible", timeout=1200)
+        return True
+    except Exception:
+        return False
+
+
 def _open_overflow(page) -> bool:
     """Open the profile header 'More' menu using robust fallbacks.
 
@@ -183,72 +289,87 @@ def _open_overflow(page) -> bool:
     2) [data-testid=userActions][role=button] or its inner [data-testid=overflow]
     3) Any role=button with aria-label containing "More", excluding sidebar/live widgets
     """
-    # 1) Exact button variant
+    # Scope all queries to the allowed root only; if not present, abort to avoid sidebar clicks
     try:
-        btn = page.locator('button[data-testid="userActions"]').first
-        btn.wait_for(state="visible", timeout=1200)
-        btn.click()
-        page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
-        return True
+        primary = page.locator('xpath=/html/body/div[1]/div/div/div[2]/main/div/div/div/div[1]').first
+        primary.wait_for(state="attached", timeout=2000)
+    except Exception:
+        return False
+
+    # Hard safety: disable pointer events in sidebar and forbidden root so accidental clicks do nothing
+    try:
+        page.evaluate(
+            """
+            () => {
+              // Disable entire sidebar by data-testid
+              if (!document.getElementById('aa-no-click-sidebar-style')) {
+                const st = document.createElement('style');
+                st.id = 'aa-no-click-sidebar-style';
+                st.textContent = [
+                  '[data-testid="sidebarColumn"], [data-testid="sidebarColumn"] * { pointer-events: none !important; }',
+                  '[data-testid="placementTracking"], [data-testid="placementTracking"] * { pointer-events: none !important; }',
+                  'button[aria-label*="space" i], [role="button"][aria-label*="space" i] { pointer-events: none !important; }',
+                  'button[aria-label*="broadcast" i], [role="button"][aria-label*="broadcast" i] { pointer-events: none !important; }'
+                ].join('\n');
+                document.head.appendChild(st);
+              }
+              // Disable the explicit forbidden root via XPath
+              try {
+                const xp = '//*[@id="react-root"]/div/div/div[2]/main/div/div/div/div[2]';
+                const node = document.evaluate(xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                if (node) node.style.pointerEvents = 'none';
+              } catch {}
+            }
+            """
+        )
     except Exception:
         pass
 
-    # 2) Container acting as a button or inner overflow
+    # Remove placements proactively and dismiss any Spaces dialog
+    _strip_placements(page)
+    _dismiss_spaces_dialog(page)
+
+    # 1) Exact button variant (inside primaryColumn)
     try:
-        ua = page.locator('[data-testid="userActions"]').first
+        btn = primary.locator('button[data-testid="userActions"]').first
+        if _safe_click(btn, wait_menu=True):
+            return True
+    except Exception:
+        pass
+
+    # 2) Container acting as a button or inner overflow (inside primaryColumn)
+    try:
+        ua = primary.locator('[data-testid="userActions"]').first
         ua.wait_for(state="attached", timeout=1200)
         role = (ua.get_attribute('role') or '').lower()
         aria = (ua.get_attribute('aria-label') or '').lower()
         if role == 'button' or ('more' in aria):
-            ua.click()
-            page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
-            return True
+            if _safe_click(ua, wait_menu=True):
+                return True
         el = ua.locator('[data-testid="overflow"]').first
-        el.wait_for(state="visible", timeout=1200)
-        el.click()
-        page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
-        return True
+        if _safe_click(el, wait_menu=True):
+            return True
     except Exception:
         pass
 
-    # 3) Global fallback: any "More" button not in sidebar/live/placement widgets
+    # 3) Fallback: search for a "More" button strictly inside primaryColumn using locators
     try:
-        ok = page.evaluate(
-            """
-            () => {
-              const isBad = (el) => {
-                // Exclude right sidebar modules and space/live widgets
-                if (el.closest('[data-testid="sidebarColumn"]')) return true;
-                if (el.closest('[data-testid="placementTracking"]')) return true;
-                // Many space/live buttons wrap the pill contents inside the button
-                // so we also check descendants instead of ancestors only
-                if (el.querySelector('[data-testid="pill-contents-container"]')) return true;
-                const aria = ((el.getAttribute('aria-label')||'') + ' ' + ((el.closest('[aria-label]')||{}).getAttribute?.('aria-label')||'')).toLowerCase();
-                if (aria.includes('broadcast') || aria.includes('space')) return true;
-                return false;
-              };
-              const byAria = Array.from(document.querySelectorAll('button[role="button"][aria-label]'));
-              for (const b of byAria) {
-                const label = (b.getAttribute('aria-label')||'').toLowerCase();
-                if (!label.includes('more')) continue;
-                if (isBad(b)) continue;
-                try { b.click(); return true; } catch {}
-              }
-              const all = Array.from(document.querySelectorAll('[role="button"]'));
-              for (const b of all) {
-                const t = (b.innerText||'').trim().toLowerCase();
-                if (t==='more' || t==='more actions') {
-                  if (isBad(b)) continue;
-                  try { b.click(); return true; } catch {}
-                }
-              }
-              return false;
-            }
-            """
-        )
-        if ok:
-            page.locator('div[role="menu"]').first.wait_for(state="visible", timeout=1200)
-            return True
+        # Candidates likely to be the overflow toggle; iterate a few and click the first safe one
+        candidate_selectors = [
+            'button[aria-label*="More" i]',
+            '[role="button"]:has-text("More actions")',
+            '[role="button"]:has-text("More")',
+        ]
+        for sel in candidate_selectors:
+            try:
+                locs = primary.locator(sel)
+                cnt = min(max(locs.count(), 0), 5)
+                for i in range(cnt):
+                    cand = locs.nth(i)
+                    if _safe_click(cand, wait_menu=True):
+                        return True
+            except Exception:
+                continue
     except Exception:
         pass
     return False
@@ -290,7 +411,7 @@ def _block_ui_sync(page) -> bool:
     if not _open_overflow(page):
         return False
     try:
-        menu = page.locator('div[role="menu"]').first
+        menu = page.locator('div[role="menu"]').last
         menu.wait_for(state="visible", timeout=1500)
     except Exception:
         return False
@@ -317,7 +438,16 @@ def _block_ui_sync(page) -> bool:
                     page.evaluate(
                         """
                         () => {
-                          const menu = document.querySelector('div[role="menu"]');
+                          const primary = document.querySelector('[data-testid="primaryColumn"]') || document.body;
+                          const prect = primary.getBoundingClientRect();
+                          const menus = Array.from(document.querySelectorAll('div[role="menu"]'));
+                          // Prefer the last visible menu whose horizontal center overlaps the primary column
+                          const candidates = menus.filter(m => {
+                            const r = m.getBoundingClientRect();
+                            const cx = r.left + r.width/2;
+                            return r.width > 0 && r.height > 0 && cx >= prect.left && cx <= prect.right;
+                          });
+                          const menu = (candidates.at(-1)) || (menus.at(-1)) || menus[0];
                           if(!menu) return false;
                           const nodes = Array.from(menu.querySelectorAll('[role="menuitem"],button,div'));
                           for (const el of nodes) {
@@ -363,16 +493,40 @@ def block_handles_sync(handles: List[str]) -> List[BlockResult]:
         try:
             rl.tick()
             page.goto(url, wait_until="domcontentloaded", timeout=5000)
+            # Preemptively remove placements/spaces and disable sidebar clicks before any other interaction
+            try:
+                _strip_placements(page)
+                page.evaluate(
+                    """
+                    () => {
+                      if (!document.getElementById('aa-no-click-sidebar-style')) {
+                        const st = document.createElement('style');
+                        st.id = 'aa-no-click-sidebar-style';
+                        st.textContent = [
+                          '[data-testid="sidebarColumn"], [data-testid="sidebarColumn"] * { pointer-events: none !important; }',
+                          '[data-testid="placementTracking"], [data-testid="placementTracking"] * { pointer-events: none !important; }',
+                          'button[aria-label*="space" i], [role="button"][aria-label*="space" i] { pointer-events: none !important; }',
+                          'button[aria-label*="broadcast" i], [role="button"][aria-label*="broadcast" i] { pointer-events: none !important; }'
+                        ].join('\n');
+                        document.head.appendChild(st);
+                      }
+                    }
+                    """
+                )
+            except Exception:
+                pass
             _ensure_view_profile(page)
             _home_scroll(page)
             _debug_shot(page, handle, "loaded")
 
-            # If not logged in UI is missing actions; give clearer error
+            # Ensure the primary column is present and contains the actions
             try:
-                page.locator('[data-testid="userActions"]').wait_for(state="attached", timeout=1200)
+                primary = page.locator('xpath=/html/body/div[1]/div/div/div[2]/main/div/div/div/div[1]').first
+                primary.wait_for(state="attached", timeout=2000)
+                primary.locator('[data-testid="userActions"]').first.wait_for(state="attached", timeout=1500)
             except Exception:
-                _debug_shot(page, handle, "no_user_actions")
-                out.append(BlockResult(handle=handle, ok=False, error="not_logged_in_or_ui_changed"))
+                _debug_shot(page, handle, "no_user_actions_or_primary")
+                out.append(BlockResult(handle=handle, ok=False, error="not_logged_in_or_ui_changed_or_no_primary"))
                 rl.jitter()
                 continue
 

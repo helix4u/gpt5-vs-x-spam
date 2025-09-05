@@ -218,6 +218,14 @@
     const key = (apiKey.value || '').trim();
     const outEl = document.getElementById('out');
     const prog = document.getElementById('prog');
+    // ensure pause/resume for scraping
+    if (!document.getElementById('pauseScrape')) {
+      const row = document.createElement('div'); row.className='row'; row.style.gap='8px'; row.style.marginTop='6px'; row.id='scrapeCtrls';
+      row.innerHTML = '<button class="btn secondary" id="pauseScrape">pause</button><button class="btn secondary" id="resumeScrape">resume</button>';
+      if (prog && prog.parentElement) { prog.parentElement.appendChild(row); }
+      document.getElementById('pauseScrape').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/pause?scope=scrape`, { method:'POST' }); } catch {} };
+      document.getElementById('resumeScrape').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/resume?scope=scrape`, { method:'POST' }); } catch {} };
+    }
     outEl.innerHTML = '';
     if(!u){ alert('enter a username'); return; }
     const qp = new URLSearchParams({ user: u, list_type: lt, classify: String(doClass.checked), max_results: String(maxResults) });
@@ -226,7 +234,20 @@
     if (model) qp.set('llm_model', model);
     const url = `${getApiBase()}/api/user_list_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(url);
-    es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; } });
+    es.addEventListener('status', (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.message === 'rate_limit_wait') {
+          prog.textContent = `rate limited — pausing ${d.seconds||0}s…`;
+        } else if (d.message === 'human_check') {
+          prog.textContent = 'human check detected — please resolve in the X window';
+        } else {
+          prog.textContent = d.message || '';
+        }
+      } catch { prog.textContent = ev.data; }
+    });
+    // reflect paused explicitly
+    es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); if (d.message==='paused') { prog.textContent='paused'; } } catch {} });
     es.addEventListener('profiles', (ev) => { try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {} });
     es.addEventListener('profiles_chunk', (ev) => { try { const list = JSON.parse(ev.data); renderProfiles(list); } catch {} });
     es.addEventListener('progress', (ev) => { try { const d = JSON.parse(ev.data); const tgt = d.target||'?'; const n = d.count||0; prog.textContent = `scraping ${n}/${tgt}`; if (Array.isArray(d.added)) renderProfiles(d.added); } catch {} });
@@ -327,6 +348,14 @@
       }
       const txt = document.getElementById('blockProgTxt');
       const fill = document.getElementById('blockProgFill');
+      // ensure pause/resume buttons for block
+      if (!document.getElementById('pauseBlock')) {
+        const row = document.createElement('div'); row.className='row'; row.style.gap='8px'; row.style.marginTop='6px';
+        row.innerHTML = '<button class="btn secondary" id="pauseBlock">pause</button><button class="btn secondary" id="resumeBlock">resume</button>';
+        document.getElementById('blockProg').appendChild(row);
+        document.getElementById('pauseBlock').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/pause?scope=block`, { method:'POST' }); } catch {} };
+        document.getElementById('resumeBlock').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/resume?scope=block`, { method:'POST' }); } catch {} };
+      }
       txt.textContent = `starting block… 0/${handles.length}`;
       fill.style.width = '0%';
       // Stream progress via SSE GET
@@ -346,6 +375,8 @@
           }
         } catch {}
       });
+      // augment status for paused/human_check
+      es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); if (d.message==='paused') { txt.textContent='paused'; } else if (d.message==='human_check') { txt.textContent='human check detected - please resolve in the X window'; } } catch {} });
       es.addEventListener('progress', (ev) => {
         try {
           const d = JSON.parse(ev.data);
@@ -391,6 +422,14 @@
         }
         const txt = document.getElementById('blockProgTxt');
         const fill = document.getElementById('blockProgFill');
+        // ensure pause/resume buttons for block
+        if (!document.getElementById('pauseBlock')) {
+          const row = document.createElement('div'); row.className='row'; row.style.gap='8px'; row.style.marginTop='6px';
+          row.innerHTML = '<button class="btn secondary" id="pauseBlock">pause</button><button class="btn secondary" id="resumeBlock">resume</button>';
+          document.getElementById('blockProg').appendChild(row);
+          document.getElementById('pauseBlock').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/pause?scope=block`, { method:'POST' }); } catch {} };
+          document.getElementById('resumeBlock').onclick = async ()=>{ try { await fetch(`${getApiBase()}/api/resume?scope=block`, { method:'POST' }); } catch {} };
+        }
         txt.textContent = 'starting retry...';
         fill.style.width = '0%';
         const url = `${getApiBase()}/api/block_stream?${qp.toString()}`;
@@ -417,6 +456,7 @@
             }
           } catch {}
         });
+        es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); if (d.message==='paused') { txt.textContent='paused'; } else if (d.message==='human_check') { txt.textContent='human check detected - please resolve in the X window'; } } catch {} });
         es.addEventListener('progress', (ev) => {
           try {
             const d = JSON.parse(ev.data);
@@ -491,8 +531,19 @@
     const sseUrl = `${getApiBase()}/api/search_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(sseUrl);
     es.addEventListener('status', (ev) => {
-      try { const d = JSON.parse(ev.data); prog.textContent = d.message || ''; } catch { prog.textContent = ev.data; }
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.message === 'rate_limit_wait') {
+          prog.textContent = `rate limited — pausing ${d.seconds||0}s…`;
+        } else if (d.message === 'human_check') {
+          prog.textContent = 'human check detected — please resolve in the X window';
+        } else {
+          prog.textContent = d.message || '';
+        }
+      } catch { prog.textContent = ev.data; }
     });
+    // also reflect paused state
+    es.addEventListener('status', (ev) => { try { const d = JSON.parse(ev.data); if (d.message==='paused') { prog.textContent='paused'; } } catch {} });
     es.addEventListener('profiles', (ev) => {
       try { const list = JSON.parse(ev.data); renderProfiles(list); attachBlockButtons(); } catch {}
     });

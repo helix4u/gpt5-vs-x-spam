@@ -6,7 +6,7 @@ from .types import SearchResponse, Profile, Classification, BlockResult
 from .scraper_sync import scrape_search_users_sync as scrape_sync, scrape_user_list_sync
 from .classifier import classify_profiles
 from .actions import block_handles, block_handles_sync, open_login_window_sync
-from .storage import save_classification, read_jsonl
+from .storage import save_classification, read_jsonl, get_failed_block_handles
 from .config import settings
 from fastapi.responses import StreamingResponse
 import json
@@ -321,11 +321,23 @@ async def api_login():
     ok = await asyncio.to_thread(open_login_window_sync)
     return {"ok": bool(ok)}
 @app.get("/api/block_stream")
-async def api_block_stream(handles: str = Query(..., description="comma-separated handles")):
-    hs = [h.strip() for h in handles.split(',') if h.strip()]
+async def api_block_stream(
+    handles: str | None = Query(None, description="comma-separated handles"),
+    retry_failed: bool = Query(False, description="if true, ignore handles and retry previously failed"),
+    limit: int | None = Query(None, description="max handles to retry when retry_failed is true"),
+    days: int | None = Query(None, description="only retry failures from the last N days when retry_failed is true"),
+):
+    if retry_failed:
+        hs = get_failed_block_handles(limit=limit, days=days)
+    else:
+        if not handles:
+            return StreamingResponse(iter([_sse_pack("done", {"ok": False})]), media_type="text/event-stream")
+        hs = [h.strip() for h in handles.split(',') if h.strip()]
     async def gen():
         total = len(hs)
         yield _sse_pack("status", {"message": "starting", "total": total})
+        if retry_failed:
+            yield _sse_pack("status", {"message": "retrying_failed", "found": total})
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 

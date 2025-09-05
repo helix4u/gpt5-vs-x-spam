@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query, Header
+import logging
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import asyncio
@@ -6,14 +7,22 @@ from .types import SearchResponse, Profile, Classification, BlockResult
 from .scraper_sync import scrape_search_users_sync as scrape_sync, scrape_user_list_sync
 from .classifier import classify_profiles
 from .actions import block_handles, block_handles_sync, open_login_window_sync
+from .pause import pause as pause_scopes, resume as resume_scopes
 from .storage import save_classification, read_jsonl, get_failed_block_handles
 from .config import settings
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import json
 from collections import defaultdict
+import uuid
+from .logging_config import init_logging
 
 
+init_logging()
+logger = logging.getLogger("app.api")
 app = FastAPI(title="gpt5-vs-x-spam")
+
+# Track running operations for pause/resume by operation_id
+active_operations: dict[str, dict] = {}
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,6 +34,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
+    logger.debug("/health")
     return {"ok": True}
 
 
@@ -42,11 +52,19 @@ async def api_search(
     headless: Optional[bool] = None,
 ):
     # Optionally override headless mode at runtime
+    logger.info("/api/search query=%r max_results=%s classify=%s", query, max_results, classify)
     if headless is not None:
         settings.headless = bool(headless)
 
     # Use sync Playwright scraper in a worker thread to avoid mixing async/sync Playwright
-    profiles: List[Profile] = await asyncio.to_thread(scrape_sync, query, max_results, None)
+    try:
+        profiles: List[Profile] = await asyncio.to_thread(scrape_sync, query, max_results, None, None)
+    except RuntimeError as e:
+        if "human_check" in str(e):
+            logger.warning("search human_check detected: %s", e)
+            return JSONResponse({"error": "human_check", "message": "Human verification required on X. Please resolve in the browser window."}, status_code=403)
+        logger.exception("search scrape_failed: %s", e)
+        return JSONResponse({"error": "scrape_failed", "message": str(e)}, status_code=500)
     classes: Optional[List[Classification]] = None
     if classify and profiles:
         overrides = {}
@@ -59,9 +77,11 @@ async def api_search(
         key = openai_api_key or x_openai_key
         if key:
             overrides["api_key"] = key
+        logger.info("classifying %d profiles", len(profiles))
         classes = await classify_profiles(profiles, overrides=overrides)
         for c in classes:
             save_classification(c)
+    logger.info("/api/search done profiles=%d classified=%s", len(profiles or []), bool(classes))
     return SearchResponse(profiles=profiles, classifications=classes)
 
 
@@ -88,6 +108,11 @@ async def api_search_stream(
     openai_api_key: Optional[str] = None,
 ):
     async def gen():
+        logger.info("/api/search_stream query=%r max_results=%s classify=%s", query, max_results, classify)
+        # operation id for pause/resume
+        op_id = uuid.uuid4().hex[:8]
+        active_operations[op_id] = {"paused": False, "scope": "scrape"}
+        yield _sse_pack("status", {"message": "operation", "operation_id": op_id})
         yield _sse_pack("status", {"message": "starting", "query": query})
         yield _sse_pack("status", {"message": "navigating"})
         yield _sse_pack("status", {"message": "scraping"})
@@ -107,9 +132,15 @@ async def api_search_stream(
             except Exception:
                 pass
 
+        def on_evt(evt: dict):
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, ("evt", evt))
+            except Exception:
+                pass
+
         # run scraper in thread
         async def run_scrape():
-            return await asyncio.to_thread(scrape_sync, query, max_results, on_new)
+            return await asyncio.to_thread(scrape_sync, query, max_results, on_new, on_evt)
 
         scrape_task = asyncio.create_task(run_scrape())
 
@@ -125,25 +156,45 @@ async def api_search_stream(
                     profiles = scrape_task.result()
                 except Exception as e:
                     # Surface scraper failure as SSE error and terminate stream gracefully
+                    logger.exception("search_stream scrape_failed: %s", e)
                     yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
                     yield _sse_pack("done", {"ok": False})
                     return
-                # drain queue for any remaining progress
+                # drain queue for any remaining progress/events
                 while not queue.empty():
                     kind, data = await queue.get()
                     if kind == "progress":
                         yield _sse_pack("progress", data)
                         if data.get("added"):
                             yield _sse_pack("profiles_chunk", data["added"])  # optional
+                    elif kind == "evt":
+                        if data.get("kind") == "rate_limit_wait":
+                            yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": data.get("seconds", 0)})
+                        elif data.get("kind") == "human_check":
+                            yield _sse_pack("status", {"message": "human_check"})
+                            yield _sse_pack("done", {"ok": False})
+                            return
+                        elif data.get("kind") == "paused":
+                            yield _sse_pack("status", {"message": "paused", "scope": data.get("scope")})
                 scraping = False
                 break
             else:
-                # we got a progress item
+                # we got a progress/event item
                 kind, data = list(done)[0].result()
                 if kind == "progress":
                     yield _sse_pack("progress", data)
                     if data.get("added"):
                         yield _sse_pack("profiles_chunk", data["added"])  # optional
+                elif kind == "evt":
+                    if data.get("kind") == "rate_limit_wait":
+                        yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": data.get("seconds", 0)})
+                    elif data.get("kind") == "human_check":
+                        logger.warning("search_stream human_check event; terminating")
+                        yield _sse_pack("status", {"message": "human_check"})
+                        yield _sse_pack("done", {"ok": False})
+                        return
+                    elif data.get("kind") == "paused":
+                        yield _sse_pack("status", {"message": "paused", "scope": data.get("scope")})
 
         # final payload
         yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
@@ -166,6 +217,7 @@ async def api_search_stream(
             for i in range(0, len(profiles), chunk_size):
                 chunk = profiles[i:i+chunk_size]
                 try:
+                    logger.debug("classifying_chunk offset=%d count=%d", i, len(chunk))
                     yield _sse_pack("status", {"message": "classifying_chunk", "offset": i, "count": len(chunk)})
                     chunk_classes = await classify_profiles(chunk, overrides=overrides)
                     for c in chunk_classes:
@@ -175,12 +227,47 @@ async def api_search_stream(
                     # adaptive sleep
                     await asyncio.sleep(1)
                 except Exception as e:
+                    logger.exception("classification_failed offset=%d: %s", i, e)
                     yield _sse_pack("error", {"message": "classification_failed", "offset": i, "detail": str(e)})
 
             yield _sse_pack("classification", [c.model_dump() for c in all_classes])
         yield _sse_pack("done", {"ok": True})
+        active_operations.pop(op_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/pause")
+async def api_pause(scope: str = Query("all")):
+    pause_scopes(scope)
+    return {"ok": True, "scope": scope}
+
+
+@app.post("/api/resume")
+async def api_resume(scope: str = Query("all")):
+    resume_scopes(scope)
+    return {"ok": True, "scope": scope}
+
+
+@app.post("/api/pause_operation")
+async def pause_operation(operation_id: str = Query(...)):
+    if operation_id in active_operations:
+        active_operations[operation_id]["paused"] = True
+        # Map op -> scope pause (global pause manager used by scrapers)
+        scope = active_operations[operation_id].get("scope", "scrape")
+        pause_scopes(scope)
+        return {"status": "paused", "operation_id": operation_id}
+    return {"status": "not_found", "operation_id": operation_id}
+
+
+@app.post("/api/resume_operation")
+async def resume_operation(operation_id: str = Query(...)):
+    if operation_id in active_operations:
+        active_operations[operation_id]["paused"] = False
+        scope = active_operations[operation_id].get("scope", "scrape")
+        resume_scopes(scope)
+        return {"status": "resumed", "operation_id": operation_id}
+    return {"status": "not_found", "operation_id": operation_id}
 
 
 @app.get("/api/user_list_stream")
@@ -195,6 +282,10 @@ async def api_user_list_stream(
     openai_api_key: Optional[str] = None,
 ):
     async def gen():
+        logger.info("/api/user_list_stream user=%r list_type=%s max_results=%s classify=%s", user, list_type, max_results, classify)
+        op_id = uuid.uuid4().hex[:8]
+        active_operations[op_id] = {"paused": False, "scope": "scrape"}
+        yield _sse_pack("status", {"message": "operation", "operation_id": op_id})
         yield _sse_pack("status", {"message": "starting", "user": user, "list": list_type})
         yield _sse_pack("status", {"message": "navigating"})
         yield _sse_pack("status", {"message": "scraping"})
@@ -213,8 +304,14 @@ async def api_user_list_stream(
             except Exception:
                 pass
 
+        def on_evt(evt: dict):
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, ("evt", evt))
+            except Exception:
+                pass
+
         async def run_scrape():
-            return await asyncio.to_thread(scrape_user_list_sync, user, list_type, max_results, on_new)
+            return await asyncio.to_thread(scrape_user_list_sync, user, list_type, max_results, on_new, on_evt)
 
         scrape_task = asyncio.create_task(run_scrape())
         profiles: List[Profile] = []
@@ -228,6 +325,7 @@ async def api_user_list_stream(
                 try:
                     profiles = scrape_task.result()
                 except Exception as e:
+                    logger.exception("user_list_stream scrape_failed: %s", e)
                     yield _sse_pack("error", {"message": "scrape_failed", "detail": str(e)})
                     yield _sse_pack("done", {"ok": False})
                     return
@@ -237,6 +335,15 @@ async def api_user_list_stream(
                         yield _sse_pack("progress", data)
                         if data.get("added"):
                             yield _sse_pack("profiles_chunk", data["added"])  # optional
+                    elif kind == "evt":
+                        if data.get("kind") == "rate_limit_wait":
+                            yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": data.get("seconds", 0)})
+                        elif data.get("kind") == "human_check":
+                            yield _sse_pack("status", {"message": "human_check"})
+                            yield _sse_pack("done", {"ok": False})
+                            return
+                        elif data.get("kind") == "paused":
+                            yield _sse_pack("status", {"message": "paused", "scope": data.get("scope")})
                 scraping = False
                 break
             else:
@@ -245,6 +352,16 @@ async def api_user_list_stream(
                     yield _sse_pack("progress", data)
                     if data.get("added"):
                         yield _sse_pack("profiles_chunk", data["added"])  # optional
+                elif kind == "evt":
+                    if data.get("kind") == "rate_limit_wait":
+                        yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": data.get("seconds", 0)})
+                    elif data.get("kind") == "human_check":
+                        logger.warning("user_list_stream human_check event; terminating")
+                        yield _sse_pack("status", {"message": "human_check"})
+                        yield _sse_pack("done", {"ok": False})
+                        return
+                    elif data.get("kind") == "paused":
+                        yield _sse_pack("status", {"message": "paused", "scope": data.get("scope")})
 
         yield _sse_pack("status", {"message": "extracted", "count": len(profiles)})
         yield _sse_pack("profiles", [p.model_dump() for p in profiles])
@@ -280,6 +397,7 @@ async def api_user_list_stream(
 
             yield _sse_pack("classification", [c.model_dump() for c in all_classes])
         yield _sse_pack("done", {"ok": True})
+        active_operations.pop(op_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -318,6 +436,7 @@ async def api_history_items(day: str, typ: str = "all", limit: int = 100, offset
 
 @app.post("/api/login")
 async def api_login():
+    logger.info("/api/login")
     ok = await asyncio.to_thread(open_login_window_sync)
     return {"ok": bool(ok)}
 @app.get("/api/block_stream")
@@ -327,6 +446,7 @@ async def api_block_stream(
     limit: int | None = Query(None, description="max handles to retry when retry_failed is true"),
     days: int | None = Query(None, description="only retry failures from the last N days when retry_failed is true"),
 ):
+    logger.info("/api/block_stream retry_failed=%s limit=%s days=%s handles=%s", retry_failed, limit, days, handles)
     if retry_failed:
         hs = get_failed_block_handles(limit=limit, days=days)
     else:
@@ -334,7 +454,10 @@ async def api_block_stream(
             return StreamingResponse(iter([_sse_pack("done", {"ok": False})]), media_type="text/event-stream")
         hs = [h.strip() for h in handles.split(',') if h.strip()]
     async def gen():
+        op_id = uuid.uuid4().hex[:8]
+        active_operations[op_id] = {"paused": False, "scope": "block"}
         total = len(hs)
+        yield _sse_pack("status", {"message": "operation", "operation_id": op_id})
         yield _sse_pack("status", {"message": "starting", "total": total})
         if retry_failed:
             yield _sse_pack("status", {"message": "retrying_failed", "found": total})
@@ -343,6 +466,12 @@ async def api_block_stream(
 
         def on_progress(evt: dict):
             try:
+                if evt.get("kind") == "progress":
+                    logger.debug("block progress %s/%s", evt.get("done"), evt.get("total"))
+                elif evt.get("kind") == "rate_limit_wait":
+                    logger.debug("block rate_limit_wait %ss", evt.get("seconds"))
+                elif evt.get("kind") == "human_check":
+                    logger.warning("block human_check event; terminating")
                 loop.call_soon_threadsafe(queue.put_nowait, evt)
             except Exception:
                 pass
@@ -359,6 +488,7 @@ async def api_block_stream(
                 try:
                     results = task.result()
                 except Exception as e:
+                    logger.exception("block_failed: %s", e)
                     yield _sse_pack("error", {"message": "block_failed", "detail": str(e)})
                     yield _sse_pack("done", {"ok": False})
                     return
@@ -369,6 +499,12 @@ async def api_block_stream(
                         yield _sse_pack("progress", evt)
                     elif evt.get("kind") == "rate_limit_wait":
                         yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": evt.get("seconds", 0)})
+                    elif evt.get("kind") == "human_check":
+                        yield _sse_pack("status", {"message": "human_check"})
+                        yield _sse_pack("done", {"ok": False})
+                        return
+                    elif evt.get("kind") == "paused":
+                        yield _sse_pack("status", {"message": "paused", "scope": evt.get("scope")})
                 blocking = False
                 break
             else:
@@ -377,9 +513,16 @@ async def api_block_stream(
                     yield _sse_pack("progress", evt)
                 elif evt.get("kind") == "rate_limit_wait":
                     yield _sse_pack("status", {"message": "rate_limit_wait", "seconds": evt.get("seconds", 0)})
+                elif evt.get("kind") == "human_check":
+                    yield _sse_pack("status", {"message": "human_check"})
+                    yield _sse_pack("done", {"ok": False})
+                    return
+                elif evt.get("kind") == "paused":
+                    yield _sse_pack("status", {"message": "paused", "scope": evt.get("scope")})
 
         yield _sse_pack("status", {"message": "completed", "done": len(results), "total": total})
         yield _sse_pack("results", [r.model_dump() for r in results])
         yield _sse_pack("done", {"ok": True})
+        active_operations.pop(op_id, None)
 
     return StreamingResponse(gen(), media_type="text/event-stream")

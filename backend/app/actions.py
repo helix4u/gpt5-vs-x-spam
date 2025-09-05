@@ -1,9 +1,14 @@
 import asyncio, random, time, re
 from typing import List, Callable
+import logging
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
 from .config import settings
 from .types import BlockResult
 from .storage import save_block_result
+from .pause import wait_if_paused
+from .detect import is_human_check as _is_human_check
+
+logger = logging.getLogger("app.actions")
 
 # Globals to keep an optional login window alive
 _LOGIN_STATE = {"pw": None, "browser": None, "ctx": None}
@@ -43,8 +48,10 @@ def _ensure_ctx() -> tuple:
             ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined });")
         except Exception:
             pass
+        logger.debug("created new Playwright context (owned=%s)", True)
         return (pw, browser, ctx, True)
     except Exception:
+        logger.exception("failed to create Playwright context")
         return (None, None, None, False)
 
 def open_login_window_sync(start_url: str = "https://x.com/login") -> bool:
@@ -82,6 +89,7 @@ def open_login_window_sync(start_url: str = "https://x.com/login") -> bool:
         _LOGIN_STATE.update({"pw": pw, "browser": browser, "ctx": ctx})
         return True
     except Exception:
+        logger.exception("failed to open login window")
         return False
 
 def close_login_window_sync() -> bool:
@@ -107,6 +115,7 @@ def close_login_window_sync() -> bool:
         _LOGIN_STATE.update({"pw": None, "browser": None, "ctx": None})
         return True
     except Exception:
+        logger.exception("failed to close login window")
         return False
 
 
@@ -120,7 +129,8 @@ class RateLimiterSync:
         """Record an action; if at limit, sleep until a slot frees.
 
         Returns the total seconds slept (0 if none). Optionally invokes
-        on_wait(seconds_remaining) before sleeping each time.
+        on_wait(seconds_remaining) every second while waiting so UIs can
+        render an accurate countdown.
         """
         slept = 0
         while True:
@@ -129,15 +139,22 @@ class RateLimiterSync:
             if len(self.actions) < self.max_actions:
                 self.actions.append(now)
                 return int(slept)
-            wait = self.window_sec - (now - self.actions[0]) + 1
-            seconds = max(1, int(wait))
-            if on_wait:
-                try:
-                    on_wait(seconds)
-                except Exception:
-                    pass
-            time.sleep(seconds)
-            slept += seconds
+            # seconds until the oldest action ages out of the window
+            wait_total = self.window_sec - (now - self.actions[0]) + 1
+            remaining = max(1, int(wait_total))
+            # Emit a live countdown and sleep in 1s steps
+            end = time.time() + remaining
+            while True:
+                rem = int(max(0, round(end - time.time())))
+                if rem <= 0:
+                    break
+                if on_wait:
+                    try:
+                        on_wait(rem)
+                    except Exception:
+                        pass
+                time.sleep(1)
+                slept += 1
 
     def jitter(self):
         # Tightened jitter — aim for human-ish but snappy (< ~260ms)
@@ -485,6 +502,7 @@ def _block_ui_sync(page) -> bool:
 
 
 def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult]:
+    logger.info("block_handles_sync starting count=%d", len(handles))
     rl = RateLimiterSync(max_actions=settings.actions_per_15min)
     out: List[BlockResult] = []
     pw, browser, ctx, owned = _ensure_ctx()
@@ -501,7 +519,10 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
     except Exception:
         pass
 
+    abort = False
     for h in handles:
+        # pause support between handles
+        wait_if_paused("block", on_progress)
         handle = h if h.startswith("@") else f"@{h}"
         url = f"https://x.com/{handle.lstrip('@')}"
         try:
@@ -511,8 +532,24 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
                         on_progress({"kind": "rate_limit_wait", "seconds": int(sec)})
                     except Exception:
                         pass
+            # Honor pause before consuming a rate-limit slot
+            wait_if_paused("block", on_progress)
+            logger.debug("blocking %s", handle)
             rl.tick(on_wait=_notify_wait)
             page.goto(url, wait_until="domcontentloaded", timeout=5000)
+            # Human-check detection
+            try:
+                if _is_human_check(page):
+                    if on_progress:
+                        try:
+                            on_progress({"kind": "human_check"})
+                        except Exception:
+                            pass
+                    logger.warning("human_check detected while blocking %s", handle)
+                    abort = True
+                    break
+            except Exception:
+                pass
             # Preemptively remove placements/spaces and disable sidebar clicks before any other interaction
             try:
                 _strip_placements(page)
@@ -552,6 +589,8 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
 
             ok = _block_ui_sync(page)
             _debug_shot(page, handle, "after_block_attempt")
+            # honor pause before post-action jitter
+            wait_if_paused("block", on_progress)
             rl.jitter()
             br = BlockResult(handle=handle, ok=ok, error=None if ok else "ui_failed")
             out.append(br)
@@ -559,6 +598,7 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
                 save_block_result(br)
             except Exception:
                 pass
+            logger.info("block result handle=%s ok=%s", handle, ok)
             # progress callback
             if on_progress:
                 try:
@@ -569,6 +609,7 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
             _debug_shot(page, handle, "timeout")
             br = BlockResult(handle=handle, ok=False, error="timeout")
             out.append(br)
+            logger.warning("timeout blocking %s", handle)
             try:
                 save_block_result(br)
             except Exception:
@@ -582,6 +623,7 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
             _debug_shot(page, handle, "exception")
             br = BlockResult(handle=handle, ok=False, error=str(e))
             out.append(br)
+            logger.exception("exception blocking %s: %s", handle, e)
             try:
                 save_block_result(br)
             except Exception:
@@ -608,6 +650,7 @@ def block_handles_sync(handles: List[str], on_progress=None) -> List[BlockResult
                 pw.stop()
         except Exception:
             pass
+    logger.info("block_handles_sync done count=%d", len(out))
     return out
 
 

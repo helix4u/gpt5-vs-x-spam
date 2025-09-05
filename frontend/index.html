@@ -368,6 +368,70 @@
       b.onclick = window.queueBlock;
       wrap.appendChild(b);
     }
+    // Retry failed button
+    if (!document.getElementById('retryfailed')) {
+      const rb = document.createElement('button');
+      rb.id = 'retryfailed'; rb.style.marginTop = '8px'; rb.style.marginLeft = '8px';
+      rb.className = 'btn secondary';
+      rb.innerText = 'run failed blocks';
+      rb.onclick = async () => {
+        // Ask for optional limits
+        let lim = prompt('Retry how many failed handles? Leave blank for all', '100');
+        let days = prompt('Only retry failures from last N days? Leave blank for all', '');
+        const qp = new URLSearchParams({ retry_failed: 'true' });
+        if (lim && /^\d+$/.test(lim)) qp.set('limit', lim);
+        if (days && /^\d+$/.test(days)) qp.set('days', days);
+
+        // progress UI
+        let progWrap = document.getElementById('blockProg');
+        if (!progWrap) {
+          progWrap = document.createElement('div'); progWrap.id = 'blockProg'; progWrap.className = 'card'; progWrap.style.marginTop='8px';
+          progWrap.innerHTML = '<div class="small" id="blockProgTxt">preparing.</div><div class="progress" style="margin-top:6px"><div class="fill" id="blockProgFill"></div></div>';
+          document.querySelector('.wrap').appendChild(progWrap);
+        }
+        const txt = document.getElementById('blockProgTxt');
+        const fill = document.getElementById('blockProgFill');
+        txt.textContent = 'starting retry...';
+        fill.style.width = '0%';
+        const url = `${getApiBase()}/api/block_stream?${qp.toString()}`;
+        const es = new EventSource(url);
+        let total = 0;
+        es.addEventListener('status', (ev) => {
+          try {
+            const d = JSON.parse(ev.data);
+            if (d.message === 'starting') {
+              total = d.total||0; txt.textContent = `starting retry. 0/${total}`;
+            } else if (d.message === 'retrying_failed') {
+              const found = d.found||0;
+              if (found === 0) {
+                txt.textContent = 'no failed handles found';
+              } else {
+                txt.textContent = `found ${found} failed handles... starting`;
+              }
+            } else if (d.message === 'rate_limit_wait') {
+              txt.textContent = `rate limited - pausing ${d.seconds||0}s.`;
+            } else if (d.message === 'completed') {
+              // handled by done
+            } else {
+              txt.textContent = d.message || '';
+            }
+          } catch {}
+        });
+        es.addEventListener('progress', (ev) => {
+          try {
+            const d = JSON.parse(ev.data);
+            const done = d.done||0;
+            const tot = d.total||total||1;
+            const pct = Math.max(0, Math.min(100, Math.round(100*done/Math.max(1,tot))));
+            txt.textContent = `blocking ${done}/${tot}`;
+            fill.style.width = pct + '%';
+          } catch {}
+        });
+        es.addEventListener('results', () => {});
+        es.addEventListener('done', () => { es.close(); });
+      };
+      wrap.appendChild(rb);
+    }
     // Select all / Deselect all helpers
     if (!document.getElementById('selall')) {
       const sAll = document.createElement('button');
@@ -490,7 +554,8 @@
   document.getElementById('loadHist').addEventListener('click', loadHist);
 
   // --------- Post Block
-  
+  // Ensure block UI (including "run failed blocks") is available even before results render
+  try { attachBlockButtons(); } catch {}
   </script>
 </body>
  </html>

@@ -21,6 +21,8 @@
     .label { display:inline-block; font-size:12px; padding:3px 8px; border-radius:999px; border:1px solid #234; margin-top:6px; max-width:100%; overflow:hidden; text-overflow:ellipsis }
     .label.bad { background:#331218; color:#ffd6db; border-color:#4e1a24 }
     .label.ok { background:#10291f; color:#d6ffee; border-color:#1a4e36 }
+    .label.warn { background:#3a2f0a; color:#ffe9a8; border-color:#5a4b16 }
+    .label.orange { background:#4a2a00; color:#ffd1a6; border-color:#6a3a00 }
     .row { display:flex; gap:8px; align-items:center; margin-top:8px }
     .row > * { min-width: 0 }
     #prog, .small { word-break: break-word; overflow-wrap:anywhere }
@@ -73,6 +75,7 @@
       <input id="q" type="text" placeholder="maye musk">
       <input id="maxN" type="number" min="1" max="100" value="40" style="width:110px" title="max results">
       <label class="small"><input id="doClass" type="checkbox" checked> classify</label>
+      <input id="modRule" type="text" placeholder="Other moderation rule (optional)" style="min-width:220px" title="e.g. no porn, no financial ads">
       <select id="vendor" title="vendor preset" style="background:#0b1220; color:var(--text); border:1px solid #223; padding:9px; border-radius:10px">
         <option value="custom">Custom</option>
         <option value="local">LM Studio (local)</option>
@@ -82,6 +85,7 @@
       </select>
       <input id="apiBase" type="text" placeholder="API base (e.g. http://127.0.0.1:1234/v1)" style="min-width:260px">
       <input id="modelId" type="text" placeholder="model id (e.g. gpt-4o-mini)" style="min-width:200px">
+      <input id="temp" type="number" step="0.1" min="0" max="2" placeholder="temperature (e.g. 0.0)" title="model temperature" style="width:150px">
       <input id="apiKey" type="password" placeholder="api key (optional)" style="min-width:200px">
       <div class="row" style="gap:8px; width:100%; flex-wrap:wrap">
         <button id="run">run</button>
@@ -128,7 +132,9 @@
       modelId: modelId.value,
       apiKey: apiKey.value,
       maxN: maxN.value,
-      classify: doClass.checked
+      classify: doClass.checked,
+      modRule: (modRule?.value || ''),
+      temperature: (temp?.value || '')
     };
     try { localStorage.setItem('gpt5x.settings', JSON.stringify(obj)); } catch {}
   };
@@ -142,6 +148,8 @@
       if (s.apiKey) apiKey.value = s.apiKey;
       if (s.maxN) maxN.value = s.maxN;
       if (typeof s.classify === 'boolean') doClass.checked = s.classify;
+      if (s.modRule && modRule) modRule.value = s.modRule;
+      if (s.temperature && temp) temp.value = s.temperature;
     } catch {}
   };
 
@@ -157,13 +165,15 @@
   const vendor = document.getElementById('vendor');
   const apiBase = document.getElementById('apiBase');
   const modelId = document.getElementById('modelId');
+  const modRule = document.getElementById('modRule');
+  const temp = document.getElementById('temp');
   const apiKey = document.getElementById('apiKey');
   const maxN = document.getElementById('maxN');
   const doClass = document.getElementById('doClass');
 
   load();
   vendor.addEventListener('change', applyVendor);
-  [apiBase, modelId, apiKey, maxN, doClass].forEach(el => el.addEventListener('change', save));
+  [apiBase, modelId, apiKey, maxN, doClass, modRule, temp].forEach(el => el && el.addEventListener('change', save));
 
   // Tabs: Search vs User List vs History
   const tabSearch = document.getElementById('tabSearch');
@@ -232,6 +242,10 @@
     if (provider && provider !== 'custom') qp.set('llm_provider', provider);
     if (base) qp.set('llm_api_base', base);
     if (model) qp.set('llm_model', model);
+    const rule2 = (modRule?.value || '').trim();
+    if (rule2) qp.set('moderation_rule', rule2);
+    const t2 = parseFloat((temp?.value || '').trim());
+    if (!Number.isNaN(t2)) qp.set('temperature', String(t2));
     const url = `${getApiBase()}/api/user_list_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(url);
     es.addEventListener('status', (ev) => {
@@ -293,8 +307,17 @@
       const badge = card.querySelector('[data-label]');
       const rs = card.querySelector('[data-reasons]');
       if (!c || !badge) return;
-      const bad = c.label.startsWith('likely_') && c.label !== 'likely_legit';
-      badge.className = 'label ' + (bad ? 'bad' : 'ok');
+      let cls = 'ok';
+      if (c.label === 'uncertain') {
+        cls = 'warn';
+      } else if (c.label === 'rule_violation') {
+        cls = 'orange';
+      } else if (c.label.startsWith('likely_') && c.label !== 'likely_legit') {
+        cls = 'bad';
+      } else {
+        cls = 'ok';
+      }
+      badge.className = 'label ' + cls;
       badge.style.display = 'inline-block';
       badge.textContent = `${c.label}... ${(c.confidence*100).toFixed(0)}%`;
       if (rs) {
@@ -328,6 +351,22 @@
       if (badge && /likely_spam/i.test(badge.textContent||'')) {
         const chk = card.querySelector('.blk');
         if (chk) { chk.checked = true; handles.push(h); }
+      }
+    });
+    return handles;
+  }
+
+  function selectByCustomRule() {
+    const handles = [];
+    const rule = (document.getElementById('modRule')?.value || '').trim().toLowerCase();
+    document.querySelectorAll('#out [data-handle]').forEach(card => {
+      const rs = card.querySelector('[data-reasons]');
+      const txt = (rs && rs.textContent ? rs.textContent : '').toLowerCase();
+      // Match either explicit rule_violation marker or the rule text itself
+      const match = rule ? (txt.includes('rule_violation') || txt.includes(rule)) : txt.includes('rule_violation');
+      if (match) {
+        const chk = card.querySelector('.blk');
+        if (chk) { chk.checked = true; handles.push(card.getAttribute('data-handle')); }
       }
     });
     return handles;
@@ -505,6 +544,14 @@
       sp.onclick = () => { const hs = selectLikelySpam(); alert(`selected ${hs.length}`); };
       wrap.appendChild(sp);
     }
+    if (!document.getElementById('selrule')) {
+      const sr = document.createElement('button');
+      sr.id = 'selrule'; sr.style.marginTop = '8px'; sr.style.marginLeft = '8px';
+      sr.className = 'btn secondary';
+      sr.innerText = 'select by custom rule';
+      sr.onclick = () => { const hs = selectByCustomRule(); alert(`selected ${hs.length}`); };
+      wrap.appendChild(sr);
+    }
   }
 
   document.getElementById('run').onclick = async () => {
@@ -528,6 +575,10 @@
     if (provider && provider !== 'custom') qp.set('llm_provider', provider);
     if (base) qp.set('llm_api_base', base);
     if (model) qp.set('llm_model', model);
+    const rule = (modRule?.value || '').trim();
+    if (rule) qp.set('moderation_rule', rule);
+    const t = parseFloat((temp?.value || '').trim());
+    if (!Number.isNaN(t)) qp.set('temperature', String(t));
     const sseUrl = `${getApiBase()}/api/search_stream?${qp.toString()}${key ? '&openai_api_key='+encodeURIComponent(key) : ''}`;
     const es = new EventSource(sseUrl);
     es.addEventListener('status', (ev) => {

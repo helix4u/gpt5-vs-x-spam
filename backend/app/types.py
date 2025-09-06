@@ -15,7 +15,7 @@ class Profile(BaseModel):
 
 class Classification(BaseModel):
     handle: str
-    label: Literal["likely_spam", "likely_impersonation", "likely_legit", "uncertain"]
+    label: Literal["likely_spam", "likely_impersonation", "likely_legit", "uncertain", "rule_violation"]
     confidence: float
     reasons: List[str] = []
 

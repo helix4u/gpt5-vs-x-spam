@@ -50,6 +50,8 @@ async def api_search(
     openai_api_key: Optional[str] = None,
     x_openai_key: Optional[str] = Header(default=None, alias="x-openai-key"),
     headless: Optional[bool] = None,
+    moderation_rule: Optional[str] = None,
+    temperature: Optional[float] = None,
 ):
     # Optionally override headless mode at runtime
     logger.info("/api/search query=%r max_results=%s classify=%s", query, max_results, classify)
@@ -77,6 +79,10 @@ async def api_search(
         key = openai_api_key or x_openai_key
         if key:
             overrides["api_key"] = key
+        if moderation_rule:
+            overrides["moderation_rule"] = moderation_rule
+        if temperature is not None:
+            overrides["temperature"] = float(temperature)
         logger.info("classifying %d profiles", len(profiles))
         classes = await classify_profiles(profiles, overrides=overrides)
         for c in classes:
@@ -106,6 +112,8 @@ async def api_search_stream(
     llm_api_base: Optional[str] = None,
     llm_model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
+    moderation_rule: Optional[str] = None,
+    temperature: Optional[float] = None,
 ):
     async def gen():
         logger.info("/api/search_stream query=%r max_results=%s classify=%s", query, max_results, classify)
@@ -210,6 +218,10 @@ async def api_search_stream(
                 overrides["model"] = llm_model
             if openai_api_key:
                 overrides["api_key"] = openai_api_key
+            if moderation_rule:
+                overrides["moderation_rule"] = moderation_rule
+            if temperature is not None:
+                overrides["temperature"] = float(temperature)
 
             # chunked classification
             chunk_size = 25
@@ -280,6 +292,8 @@ async def api_user_list_stream(
     llm_api_base: Optional[str] = None,
     llm_model: Optional[str] = None,
     openai_api_key: Optional[str] = None,
+    moderation_rule: Optional[str] = None,
+    temperature: Optional[float] = None,
 ):
     async def gen():
         logger.info("/api/user_list_stream user=%r list_type=%s max_results=%s classify=%s", user, list_type, max_results, classify)
@@ -377,6 +391,10 @@ async def api_user_list_stream(
                 overrides["model"] = llm_model
             if openai_api_key:
                 overrides["api_key"] = openai_api_key
+            if moderation_rule:
+                overrides["moderation_rule"] = moderation_rule
+            if temperature is not None:
+                overrides["temperature"] = float(temperature)
 
             # chunked classification
             chunk_size = 25

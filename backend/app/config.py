@@ -1,10 +1,17 @@
 import os
+import os
 from typing import List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
 
 class Settings(BaseSettings):
+    # Pydantic v2 settings config (do NOT also declare inner Config)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra='ignore',  # ignore unknown keys in .env to prevent startup crashes
+    )
     data_dir: str = Field(default="data")
     cache_dir: str = Field(default="data/cache")
     dataset_path: str = Field(default="data/dataset.jsonl")
@@ -14,6 +21,7 @@ class Settings(BaseSettings):
     llm_provider: str = Field(default="local")  # local or openai
     llm_api_base: str = Field(default="http://127.0.0.1:1234/v1")
     llm_model: str = Field(default="gpt-4o-mini")
+    llm_temperature: float = Field(default=0.0)
     openai_api_key: str = Field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
 
     # action safety
@@ -55,9 +63,7 @@ class Settings(BaseSettings):
     api_host: str = Field(default_factory=lambda: os.getenv("API_HOST", "127.0.0.1"))
     api_port: int = Field(default_factory=lambda: int(os.getenv("API_PORT", "8000")))
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # Note: for Pydantic v1, use a separate branch to define Config.
 
 
 settings = Settings()

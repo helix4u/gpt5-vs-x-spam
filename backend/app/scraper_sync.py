@@ -151,7 +151,7 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
     """
     # Allow an extra moment for UI stabilization before first scroll
     try:
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(2000)
     except Exception:
         pass
     cells = page.locator('[data-testid="UserCell"]')
@@ -160,6 +160,8 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
     step = max(600, int(settings.scrape_scroll_step_px))
     stable = 0
     last_uniques = 0
+    last_scroll_y = -1
+    stuck = 0  # consecutive loops with no scroll movement
 
     for _ in range(max_iters):
         # pause support
@@ -197,8 +199,27 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
         else:
             stable = 0
             last_uniques = len(out_by_handle)
+        # If we appear stable, attempt a one-time rescue nudge before giving up
         if stable >= max(3, int(settings.scrape_scroll_stable_iters)):
-            break
+            try:
+                # heavy nudge: jump to end and wheel more
+                page.keyboard.press("End")
+            except Exception:
+                pass
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", step * 2)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
+            except Exception:
+                pass
+            # Recheck whether we grew
+            if len(out_by_handle) == last_uniques:
+                break
+            else:
+                stable = 0
+                continue
         # Scroll to load more
         try:
             if count > 0:
@@ -215,6 +236,32 @@ def _collect_profiles_incremental(page, query: str, max_results: int = 40, on_ne
         # allow pause while waiting
         wait_if_paused("scrape", on_evt)
         page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
+
+        # Track actual scroll movement; if stuck, apply stronger fallback
+        try:
+            cur_y = page.evaluate("window.scrollY")
+        except Exception:
+            cur_y = None
+        if isinstance(cur_y, (int, float)):
+            if int(cur_y) == int(last_scroll_y):
+                stuck += 1
+            else:
+                stuck = 0
+                last_scroll_y = int(cur_y)
+        if stuck >= 2:
+            try:
+                page.keyboard.press("PageDown")
+            except Exception:
+                pass
+            try:
+                page.evaluate("window.scrollBy(0, arguments[0])", step * 2)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(max(400, int(settings.scrape_scroll_wait_ms)))
+            except Exception:
+                pass
+            stuck = 0
 
     logger.info("collected %d profiles (target=%d)", len(out_by_handle), max_results)
     return list(out_by_handle.values())

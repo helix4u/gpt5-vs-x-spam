@@ -111,6 +111,10 @@ Security & compliance
 
 --
 
+## Support
+
+If the tool is helpful, consider supporting it on [Ko-fi](https://ko-fi.com/gille).
+
 <img width="1470" height="1129" alt="image" src="https://github.com/user-attachments/assets/758e456e-1010-4bbd-86d7-780db7bfa4f3" />
 
 
